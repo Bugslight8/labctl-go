@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Bugslight8/labctl/internal/hubclient"
 	"github.com/Bugslight8/labctl/internal/inventory"
 	"github.com/Bugslight8/labctl/internal/sshx"
 	"github.com/Bugslight8/labctl/internal/tailnet"
@@ -61,6 +62,9 @@ func (a *App) wakeCmd(ctx context.Context, args []string) error {
 func (a *App) wake(ctx context.Context, v *view, h inventory.Host, st *tailnet.Status, wait bool) error {
 	viaHub := v.hub != nil && h.HubWakeable
 	if !viaHub {
+		if h.MAC == "" && v.hub != nil {
+			return fmt.Errorf("the hub has no mac for %s, so it cannot be woken: add mac = ... to %s on the hub", h.Name, h.Name)
+		}
 		if h.MAC == "" {
 			return fmt.Errorf("%s has no mac in %s, so it cannot be woken", h.Name, a.HostsPath)
 		}
@@ -75,7 +79,9 @@ func (a *App) wake(ctx context.Context, v *view, h inventory.Host, st *tailnet.S
 	}
 	if viaHub {
 		fmt.Fprintf(a.Stderr, "waking %s via the hub ...\n", h.Name)
-		if err := v.hub.Wake(ctx, h.Name); err != nil {
+		if err := v.hub.Wake(ctx, h.Name); errors.Is(err, hubclient.ErrRecentlyWoken) {
+			fmt.Fprintf(a.Stderr, "%s: the hub woke it less than 10 s ago; waiting for it\n", h.Name)
+		} else if err != nil {
 			return err
 		}
 	} else if err := a.wakeViaRelay(ctx, v.inv, h, st); err != nil {

@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Bugslight8/labctl/internal/hub"
+	"github.com/Bugslight8/labctl/internal/tailnet"
 )
 
 // fakeHub is an httptest server standing in for the hub; the client reaches it through a dialer that ignores the
@@ -134,37 +135,115 @@ func TestCache(t *testing.T) {
 	}
 }
 
-// T2: the hub name must resolve to Tailscale addresses only; a LAN or public answer is never dialed.
+// T2 (security round 1, M1): the hub's address comes from this machine's Tailscale, never from DNS. Only a peer of
+// this tailnet with that MagicDNS name is dialed, at its own Tailscale address; with Tailscale down, nothing is.
 func TestHubAddress(t *testing.T) {
 	var dialed []string
+	status := &tailnet.Status{Suffix: "tail0000.ts.net", Peers: []tailnet.Peer{
+		{Name: "mini", DNSName: "mini.other.ts.net", IP: "100.64.9.9"}, // shared in from another tailnet
+		{Name: "mini", DNSName: "mini.tail0000.ts.net", IP: "100.64.0.10"},
+		{Name: "shared", DNSName: "shared.other.ts.net", IP: "100.64.9.8"},
+	}}
+	var statusErr error
 	d := Dialer{
-		Lookup: func(_ context.Context, host string) ([]netip.Addr, error) {
-			switch host {
-			case "mini":
-				return []netip.Addr{netip.MustParseAddr("192.168.1.9"), netip.MustParseAddr("100.64.0.10")}, nil
-			case "impostor":
-				return []netip.Addr{netip.MustParseAddr("192.168.1.66"), netip.MustParseAddr("8.8.8.8")}, nil
-			}
-			return nil, errors.New("no such host")
-		},
+		Status: func(context.Context) (*tailnet.Status, error) { return status, statusErr },
 		Dial: func(_ context.Context, _, addr string) (net.Conn, error) {
 			dialed = append(dialed, addr)
 			return nil, errors.New("test: not connecting")
 		},
 	}
 	ctx := context.Background()
-	d.DialContext(ctx, "tcp", "mini:7300")
-	if len(dialed) != 1 || dialed[0] != "100.64.0.10:7300" {
-		t.Errorf("mini dialed %v, want only its Tailscale address", dialed)
+	for _, addr := range []string{"mini:7300", "mini.tail0000.ts.net:7300", "100.64.0.10:7300"} {
+		dialed = nil
+		d.DialContext(ctx, "tcp", addr)
+		if len(dialed) != 1 || dialed[0] != "100.64.0.10:7300" {
+			t.Errorf("%s dialed %v, want only this tailnet's mini", addr, dialed)
+		}
 	}
 	dialed = nil
-	for _, addr := range []string{"impostor:7300", "192.168.1.9:7300", "8.8.8.8:7300", "nowhere:7300"} {
+	for _, addr := range []string{
+		"shared:7300",            // only a shared-in node has that name
+		"mini.other.ts.net:7300", // the shared-in node by full name
+		"100.127.1.1:7300",       // a carrier-range address that is no peer (a café's DNS answer)
+		"100.64.9.9:7300",        // the shared-in node's address
+		"192.168.1.9:7300", "nowhere:7300",
+	} {
 		if _, err := d.DialContext(ctx, "tcp", addr); err == nil || len(dialed) != 0 {
 			t.Errorf("%s: err %v, dialed %v", addr, err, dialed)
 		}
 	}
-	d.DialContext(ctx, "tcp", "[fd7a:115c:a1e0::10]:7300")
-	if len(dialed) != 1 {
-		t.Errorf("a Tailscale IPv6 literal was not dialed: %v", dialed)
+	statusErr = errors.New("tailscale is Stopped on this machine")
+	if _, err := d.DialContext(ctx, "tcp", "mini:7300"); err == nil || len(dialed) != 0 {
+		t.Errorf("Tailscale down: err %v, dialed %v", err, dialed)
+	}
+}
+
+// M2: the hub's error text reaches the terminal only without control characters, and short
+func TestErrorTextIsPrintable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"result": "\x1b]0;owned\a\x1b[2J" + strings.Repeat("x", 5000)})
+	}))
+	defer srv.Close()
+	c := New("mini", 7300, func(ctx context.Context, n, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, n, srv.Listener.Addr().String())
+	})
+	_, err := c.Hosts(context.Background())
+	if err == nil || strings.ContainsAny(err.Error(), "\x1b\a") || len(err.Error()) > 300 {
+		t.Errorf("error %q", err)
+	}
+}
+
+// L1: a redirect is never followed (it would carry X-Labctl to wherever an impostor points)
+func TestNoRedirects(t *testing.T) {
+	hit := false
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hit = true }))
+	defer target.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/v1/wake/korg", http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+	c := New("mini", 7300, func(ctx context.Context, n, addr string) (net.Conn, error) {
+		if strings.HasPrefix(addr, "mini:") {
+			addr = srv.Listener.Addr().String()
+		}
+		return (&net.Dialer{}).DialContext(ctx, n, addr)
+	})
+	if err := c.Wake(context.Background(), "korg"); err == nil || hit {
+		t.Errorf("redirect followed: err %v, target hit %v", err, hit)
+	}
+}
+
+// review R1: an answer without its lists is an error, never an empty list (which would then be cached)
+func TestMissingFields(t *testing.T) {
+	body := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/wake/") {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		io.WriteString(w, body)
+	}))
+	defer srv.Close()
+	c := New("mini", 7300, func(ctx context.Context, n, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, n, srv.Listener.Addr().String())
+	})
+	ctx := context.Background()
+	body = `{"relay": "mini", "items": [{"name": "korg"}]}`
+	if _, err := c.Hosts(ctx); err == nil {
+		t.Error("hosts answer without hosts accepted")
+	}
+	body = `{"relay": "mini", "hosts": []}`
+	if r, err := c.Hosts(ctx); err != nil || len(r.Hosts) != 0 {
+		t.Errorf("an empty list is fine: %v", err)
+	}
+	for _, b := range []string{`{"last": 3}`, `{"events": [], "last": 3}`, `{"boot": "b", "last": 3}`} {
+		body = b
+		if _, err := c.Events(ctx, 0, ""); err == nil {
+			t.Errorf("events answer %s accepted", b)
+		}
+	}
+	if err := c.Wake(ctx, "korg"); !errors.Is(err, ErrRecentlyWoken) {
+		t.Errorf("429 = %v, want ErrRecentlyWoken", err)
 	}
 }

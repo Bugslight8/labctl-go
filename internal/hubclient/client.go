@@ -15,10 +15,13 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Bugslight8/labctl/internal/hub"
 	"github.com/Bugslight8/labctl/internal/inventory"
+	"github.com/Bugslight8/labctl/internal/tailnet"
 )
 
 const (
@@ -37,7 +40,11 @@ type Client struct {
 func New(host string, port int, dial func(ctx context.Context, network, addr string) (net.Conn, error)) *Client {
 	return &Client{
 		base: "http://" + net.JoinHostPort(host, strconv.Itoa(port)),
-		http: &http.Client{Transport: &http.Transport{DialContext: dial, Proxy: nil}},
+		http: &http.Client{
+			Transport: &http.Transport{DialContext: dial, Proxy: nil}, // no proxy: the dialer decides where we connect
+			// never follow a redirect: it would carry X-Labctl to wherever the answer points
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 	}
 }
 
@@ -63,7 +70,7 @@ func (c *Client) do(ctx context.Context, method, path string, timeout time.Durat
 		if resp.StatusCode == http.StatusForbidden {
 			return errors.New("the hub refused this device: is it signed in to Tailscale as an allowed login?")
 		}
-		return fmt.Errorf("hub: %s (%d)", msg.Result+msg.Error, resp.StatusCode)
+		return statusError{resp.StatusCode, fmt.Sprintf("hub: %s (%d)", printable(msg.Result+msg.Error, 200), resp.StatusCode)}
 	}
 	if v == nil {
 		return nil
@@ -76,6 +83,9 @@ func (c *Client) Hosts(ctx context.Context) (*hub.HostsResponse, error) {
 	var r hub.HostsResponse
 	if err := c.do(ctx, http.MethodGet, "/v1/hosts", requestTimeout, &r); err != nil {
 		return nil, err
+	}
+	if r.Hosts == nil { // the hub always sends a list, empty or not: a missing one is a different or broken server
+		return nil, errors.New("hub: the answer has no host list")
 	}
 	if _, err := Inventory(&r); err != nil {
 		return nil, err
@@ -93,16 +103,35 @@ func (c *Client) Events(ctx context.Context, since uint64, boot string) (*hub.Ev
 	if err := c.do(ctx, http.MethodGet, "/v1/events?"+q.Encode(), pollTimeout, &r); err != nil {
 		return nil, err
 	}
+	if r.Events == nil || r.Boot == "" {
+		return nil, errors.New("hub: the events answer has no events list or boot id")
+	}
 	return &r, nil
 }
+
+// ErrRecentlyWoken: the hub sent this host's packet less than 10 s ago (and so sends no other yet).
+var ErrRecentlyWoken = errors.New("the hub woke it less than 10 s ago")
 
 // Wake asks the hub to send name's magic packet.
 func (c *Client) Wake(ctx context.Context, name string) error {
 	if err := inventory.CheckHost(inventory.Host{Name: name, Tailnet: name}); err != nil {
 		return err
 	}
-	return c.do(ctx, http.MethodPost, "/v1/wake/"+url.PathEscape(name), requestTimeout, nil)
+	err := c.do(ctx, http.MethodPost, "/v1/wake/"+url.PathEscape(name), requestTimeout, nil)
+	var se statusError
+	if errors.As(err, &se) && se.code == http.StatusTooManyRequests {
+		return ErrRecentlyWoken
+	}
+	return err
 }
+
+// statusError is a non-2xx answer.
+type statusError struct {
+	code int
+	msg  string
+}
+
+func (e statusError) Error() string { return e.msg }
 
 // Inventory turns a hub answer into hosts, applying the same rules as the hosts file to every field that reaches
 // ssh. The hub never sends MACs: a wakeable host is woken through the hub.
@@ -136,10 +165,7 @@ func SaveCache(path string, r *hub.HostsResponse) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
+	return os.Rename(tmp.Name(), path) // CreateTemp made it 0600
 }
 
 // LoadCache reads the cached answer and when it was written, applying the same host rules as a live answer.
@@ -162,21 +188,31 @@ func LoadCache(path string) (*hub.HostsResponse, time.Time, error) {
 	return &r, fi.ModTime(), nil
 }
 
-// Dialer connects to the hub only at Tailscale addresses (T2): whatever DNS says, a LAN or public address that
-// answers for the hub's name is never dialed, so no other machine can stand in for it.
+// printable drops control characters (terminal escape sequences) from text the hub sends, and clips it.
+func printable(s string, max int) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '?'
+		}
+		return r
+	}, s)
+	if len(s) > max {
+		s = s[:max] + "..."
+	}
+	return s
+}
+
+// Dialer connects to the hub only at the address this machine's Tailscale gives for it (T2). DNS is never asked:
+// on another network, or with Tailscale or MagicDNS off, a DNS answer in Tailscale's ranges (shared carrier space)
+// can point anywhere. The hub must be a peer of this tailnet (not a node shared in from another) with that name.
 type Dialer struct {
-	Lookup func(ctx context.Context, host string) ([]netip.Addr, error)
+	Status func(ctx context.Context) (*tailnet.Status, error) // fails unless Tailscale is running
 	Dial   func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
-// SystemDialer resolves with the system resolver (Tailscale's MagicDNS on a tailnet device).
+// SystemDialer asks the local tailscale CLI.
 func SystemDialer() Dialer {
-	return Dialer{
-		Lookup: func(ctx context.Context, host string) ([]netip.Addr, error) {
-			return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-		},
-		Dial: (&net.Dialer{Timeout: requestTimeout}).DialContext,
-	}
+	return Dialer{Status: tailnet.Query, Dial: (&net.Dialer{Timeout: requestTimeout}).DialContext}
 }
 
 // DialContext is for http.Transport.
@@ -185,16 +221,33 @@ func (d Dialer) DialContext(ctx context.Context, network, addr string) (net.Conn
 	if err != nil {
 		return nil, err
 	}
-	var ips []netip.Addr
-	if ip, err := netip.ParseAddr(host); err == nil {
-		ips = []netip.Addr{ip}
-	} else if ips, err = d.Lookup(ctx, host); err != nil {
-		return nil, err
+	st, err := d.Status(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("finding the hub needs Tailscale: %w", err)
 	}
-	for _, ip := range ips {
-		if hub.InTailnet(ip) {
-			return d.Dial(ctx, network, net.JoinHostPort(ip.Unmap().String(), port))
+	if p, ok := hubPeer(st, host); ok {
+		return d.Dial(ctx, network, net.JoinHostPort(p.IP, port))
+	}
+	return nil, fmt.Errorf("%s is not a device in your tailnet, so it is not your hub", host)
+}
+
+// hubPeer finds the peer of this tailnet (DNSName = name + this tailnet's suffix) that host names, by short or full
+// MagicDNS name or by its Tailscale IP.
+func hubPeer(st *tailnet.Status, host string) (tailnet.Peer, bool) {
+	ip, perr := netip.ParseAddr(host)
+	isIP := perr == nil
+	full := strings.TrimSuffix(host, ".")
+	for _, p := range st.Peers {
+		if st.Suffix == "" || !strings.EqualFold(p.DNSName, p.Name+"."+st.Suffix) || p.IP == "" {
+			continue // shared in from another tailnet, or no address
 		}
+		switch {
+		case isIP && ip.Unmap().String() == p.IP:
+		case !isIP && (strings.EqualFold(full, p.Name) || strings.EqualFold(full, p.DNSName)):
+		default:
+			continue
+		}
+		return p, true
 	}
-	return nil, fmt.Errorf("%s does not resolve to a Tailscale address, so it is not your hub", host)
+	return tailnet.Peer{}, false
 }

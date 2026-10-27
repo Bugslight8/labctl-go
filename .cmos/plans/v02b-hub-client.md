@@ -21,8 +21,9 @@ after the hub stops; the binary itself cannot reach a test hub without an addres
 
 ## Design
 - Client hosts file: `hub_host = "<host>"` (and optional `hub_port`, default 7300); hosts may be left out. (Not `hub`:
-  the hub's own file has a `[hub]` table, and TOML cannot hold both.) With a hub, the hub's list wins, and local
-  entries are only the fallback.
+  the hub's own file has a `[hub]` table, and TOML cannot hold both.) The hub's list supplies every host the local
+  file does not have; a host in the local file keeps its own tailnet, user, tmux and mac (security review L3), and
+  hub or cached hosts that collide with a local one by name or tailnet name are dropped (L2).
 - `internal/hubclient`: GET /v1/hosts, GET /v1/events (long poll), POST /v1/wake with `X-Labctl: 1`; 3 s timeout
   except the long poll. Cache: the last /v1/hosts answer in `~/.cache/labctl/hosts.json` (0600), used when the hub is
   unreachable, with a one-line notice naming the hub and how old the cache is.
@@ -34,8 +35,8 @@ after the hub stops; the binary itself cannot reach a test hub without an addres
 | id | boundary | threat | mitigation | check |
 |---|---|---|---|---|
 | T1 | hub / cache -> ssh argv | a hub answer or an edited cache file holds `-oProxyCommand=...` names | the same `inventory` validation on every hub answer and every cache load | `go test ./internal/hubclient -run TestRejectsUnsafeHostList` |
-| T2 | impostor -> client | another tailnet device answers as the hub | the hub address is the configured host's MagicDNS name; only Tailscale addresses accepted for it | `go test ./internal/hubclient -run TestHubAddress` |
-| T3 | hub stream -> terminal | event text carries escape sequences | `printable` on every field `watch` prints | `go test ./internal/cli -run TestWatchStripsControlChars` |
+| T2 | impostor -> client | another device answers as the hub (hostile network DNS, Tailscale or MagicDNS off, a shared-in node) | the hub's address comes from the local `tailscale status` (never DNS): a peer of this tailnet with that name, dialed at its own Tailscale IP; Tailscale down = no connection; redirects never followed | `go test ./internal/hubclient -run 'TestHubAddress|TestNoRedirects'` |
+| T3 | hub stream -> terminal | event or error text carries escape sequences | `printable` on every field `watch` prints and on hub error text (clipped to 200) | `go test ./internal/cli -run TestWatchStripsControlChars ./internal/hubclient -run TestErrorTextIsPrintable` |
 
 ## Unknowns
 - None that block the build; the real try needs the mini on the tailnet with v02a installed.

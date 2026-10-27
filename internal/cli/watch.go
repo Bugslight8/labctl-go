@@ -15,20 +15,18 @@ const (
 // watch prints the hub's events as they happen, until ctx ends (Ctrl-C). A hub that stops answering is reported
 // once per outage and retried; a hub restart (new boot id) is announced and followed from its first event.
 func (a *App) watch(ctx context.Context) error {
-	v, err := a.load(ctx, true)
+	local, err := a.inventory()
 	if err != nil {
 		return err
 	}
-	if v.hub == nil {
-		if v.inv.HubHost == "" {
-			return errors.New("labctl watch needs a hub: set hub_host = \"<the hub's MagicDNS name>\" in the hosts file")
-		}
-		return fmt.Errorf("labctl watch needs the hub, and %s is not answering", v.inv.HubHost)
+	if local.HubHost == "" || a.HubClient == nil {
+		return errors.New("labctl watch needs a hub: set hub_host = \"<the hub's MagicDNS name>\" in the hosts file")
 	}
+	h := a.HubClient(local.HubHost, local.HubPort)
 	var since uint64
 	boot, first, failing := "", true, false
 	for {
-		r, err := v.hub.Events(ctx, since, boot)
+		r, err := h.Events(ctx, since, boot)
 		if ctx.Err() != nil {
 			return nil
 		}
