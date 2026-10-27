@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -47,6 +48,7 @@ func newAPI(t *testing.T) *apiHarness {
 	t.Cleanup(func() { audit.Close() })
 	h.srv = &Server{
 		Inv: inv, Mon: h.mon, Auth: auth, Audit: audit, Now: now, LongPoll: 50 * time.Millisecond,
+		AllowedHosts: []string{"mini", "mini.tail0000.ts.net", "100.64.0.10"},
 		SendWOL: func(mac net.HardwareAddr, addr string) error {
 			h.sent = append(h.sent, mac.String()+" "+addr)
 			return nil
@@ -58,7 +60,12 @@ func newAPI(t *testing.T) *apiHarness {
 func (h *apiHarness) do(method, path, remote string, hdr map[string]string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, path, nil)
 	r.RemoteAddr = remote
+	r.Host = "mini:7300"
 	for k, v := range hdr {
+		if k == "Host" {
+			r.Host = v
+			continue
+		}
 		r.Header.Set(k, v)
 	}
 	rec := httptest.NewRecorder()
@@ -89,6 +96,9 @@ func TestHostsAPI(t *testing.T) {
 	if body.Hosts[0].Wakeable {
 		t.Error("mini has no mac but is wakeable")
 	}
+	if body.Hosts[0].State != string(Up) || body.Hosts[0].IP != "100.64.0.10" {
+		t.Errorf("the hub's own machine: %+v", body.Hosts[0])
+	}
 	if strings.Contains(rec.Body.String(), "aa:bb:cc") || strings.Contains(rec.Body.String(), "owner@example.com") {
 		t.Errorf("hosts answer leaks MACs or the allow list:\n%s", rec.Body)
 	}
@@ -101,8 +111,13 @@ func TestEventsAPI(t *testing.T) {
 	h := newAPI(t)
 	var body EventsResponse
 	rec := h.do("GET", "/v1/events?since=0", owner, nil)
-	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &body) != nil || len(body.Events) != 3 || body.Last != 3 {
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &body) != nil || len(body.Events) != 3 || body.Last != 3 || body.Boot != h.mon.Boot {
 		t.Fatalf("baseline: %d %s", rec.Code, rec.Body)
+	}
+	// a client from before a hub restart (other boot) starts over from 0 at once
+	rec = h.do("GET", "/v1/events?since=2&boot=oldboot", owner, nil)
+	if json.Unmarshal(rec.Body.Bytes(), &body) != nil || len(body.Events) != 3 {
+		t.Errorf("stale boot: %s", rec.Body)
 	}
 	// nothing new: the long poll ends empty after LongPoll
 	start := time.Now()
@@ -192,6 +207,91 @@ func TestWakeRateLimit(t *testing.T) {
 	}
 	if len(h.sent) != 2 {
 		t.Errorf("sent %v", h.sent)
+	}
+
+	// a failed send does not use up the slot: the retry goes out at once
+	*h.clock = h.clock.Add(11 * time.Second)
+	h.srv.SendWOL = func(net.HardwareAddr, string) error { return errors.New("network is down") }
+	if rec := h.do("POST", "/v1/wake/fabric-twin", owner, wakeHdr); rec.Code != http.StatusBadGateway {
+		t.Errorf("failed send: %d", rec.Code)
+	}
+	h.srv.SendWOL = func(net.HardwareAddr, string) error { return nil }
+	if rec := h.do("POST", "/v1/wake/fabric-twin", owner, wakeHdr); rec.Code != http.StatusAccepted {
+		t.Errorf("retry after a failed send: %d", rec.Code)
+	}
+}
+
+// review 8: the hub sends the packet itself, so a host with a MAC is wakeable even without a relay setting
+func TestWakeableWithoutRelay(t *testing.T) {
+	h := newAPI(t)
+	inv, err := inventory.Parse([]byte(strings.Replace(hostsFile, `relay = "mini"`, "", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.srv.Inv = inv
+	var body HostsResponse
+	json.Unmarshal(h.do("GET", "/v1/hosts", owner, nil).Body.Bytes(), &body)
+	if !body.Hosts[1].Wakeable {
+		t.Errorf("fabric-twin has a mac: %+v", body.Hosts[1])
+	}
+}
+
+// security M3: a DNS-rebinding page is same-origin (no Origin header) but carries its own Host and Sec-Fetch-*
+func TestDNSRebinding(t *testing.T) {
+	h := newAPI(t)
+	for _, hdr := range []map[string]string{
+		{"Host": "evil.example:7300"},
+		{"Host": "evil.example"},
+		{"Host": "100.64.0.10.evil.example:7300"},
+		{"Sec-Fetch-Site": "same-origin"},
+		{"Sec-Fetch-Mode": "cors"},
+	} {
+		if rec := h.do("GET", "/v1/hosts", owner, hdr); rec.Code != http.StatusForbidden {
+			t.Errorf("%v: %d", hdr, rec.Code)
+		}
+	}
+	for _, host := range []string{"mini:7300", "MINI.tail0000.ts.net:7300", "mini.tail0000.ts.net.:7300", "100.64.0.10:7300", "mini"} {
+		if rec := h.do("GET", "/v1/hosts", owner, map[string]string{"Host": host}); rec.Code != 200 {
+			t.Errorf("Host %q: %d", host, rec.Code)
+		}
+	}
+}
+
+// security M2: refusals cannot fill the disk: logged once per address per minute, paths cut, file rotated
+func TestAuditLimits(t *testing.T) {
+	h := newAPI(t)
+	long := "/v1/" + strings.Repeat("A", 5000)
+	for i := 0; i < 50; i++ {
+		h.do("GET", long, strangerAddr+":4000", nil)
+	}
+	h.srv.Audit.Close()
+	data, _ := os.ReadFile(filepath.Join(h.dir, "audit.jsonl"))
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 1 || len(lines[0]) > 600 {
+		t.Fatalf("%d records, first %d bytes", len(lines), len(lines[0]))
+	}
+	*h.clock = h.clock.Add(61 * time.Second)
+	a, err := OpenAudit(h.dir, func() time.Time { return *h.clock })
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.srv.Audit = a
+	h.do("GET", long, strangerAddr+":4000", nil)
+	if a.size == 0 {
+		t.Error("a refusal a minute later was not logged")
+	}
+
+	// rotation: past the cap, audit.jsonl moves to audit.jsonl.1 and a new one starts
+	a.max = 400
+	for i := 0; i < 5; i++ {
+		a.Log(AuditRecord{Action: "wake", Host: "fabric-twin", Result: "sent"})
+	}
+	a.Close()
+	if fi, err := os.Stat(filepath.Join(h.dir, "audit.jsonl.1")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("rotated file: %v %v", fi, err)
+	}
+	if fi, _ := os.Stat(filepath.Join(h.dir, "audit.jsonl")); fi.Size() > 400 || fi.Mode().Perm() != 0o600 {
+		t.Errorf("current file %d bytes, mode %v", fi.Size(), fi.Mode().Perm())
 	}
 }
 

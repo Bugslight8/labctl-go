@@ -79,7 +79,13 @@ func TestLaunchd(t *testing.T) {
 	if _, err := os.Stat(plist); !os.IsNotExist(err) {
 		t.Errorf("plist still there: %v", err)
 	}
+	// not loaded is fine; any other launchctl failure must be reported, not printed as success
+	l.Run = func(...string) error { return errors.New("Boot-out failed: 3: No such process") }
 	if err := l.Uninstall(); err != nil {
-		t.Errorf("uninstall twice: %v", err)
+		t.Errorf("uninstall when not loaded: %v", err)
+	}
+	l.Run = func(...string) error { return errors.New("Boot-out failed: 5: Input/output error") }
+	if err := l.Uninstall(); err == nil {
+		t.Error("a real bootout failure was swallowed")
 	}
 }

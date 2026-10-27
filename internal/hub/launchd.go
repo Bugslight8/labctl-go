@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // Label is the launchd job name.
@@ -109,9 +110,17 @@ func (l *Launchd) Install(exe, hostsPath, stateDir string) (string, error) {
 		l.plist(), filepath.Join(stateDir, "hub.log")), nil
 }
 
-// Uninstall stops the job and removes the plist. Not installed is not an error.
+// notLoaded reports whether a launchctl error only means the job was not loaded.
+func notLoaded(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "No such process") || strings.Contains(s, "Could not find service")
+}
+
+// Uninstall stops the job and removes the plist. Not installed is not an error; any other launchctl failure is.
 func (l *Launchd) Uninstall() error {
-	_ = l.Run("bootout", fmt.Sprintf("gui/%d/%s", l.UID, Label))
+	if err := l.Run("bootout", fmt.Sprintf("gui/%d/%s", l.UID, Label)); err != nil && !notLoaded(err) {
+		return err
+	}
 	if err := os.Remove(l.plist()); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}

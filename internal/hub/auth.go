@@ -16,7 +16,11 @@ import (
 	"github.com/Bugslight8/labctl/internal/tailnet"
 )
 
-const whoisTTL = 60 * time.Second
+const (
+	whoisTTL     = 10 * time.Second // short: Tailscale can hand an address to another device
+	whoisFailTTL = 5 * time.Second  // failed lookups are cached too, so a stranger cannot make one per request
+	whoisMax     = 4                // concurrent `tailscale whois` processes, across all addresses
+)
 
 // Tailscale assigns addresses only from these ranges; the hub trusts whois answers only for them.
 var tailnetRanges = []netip.Prefix{
@@ -55,7 +59,7 @@ func TailscaleWhois(ctx context.Context, a netip.Addr) (Caller, error) {
 	}
 	out, err := exec.CommandContext(ctx, bin, WhoisArgv(a)...).Output()
 	if err != nil {
-		return Caller{}, fmt.Errorf("tailscale whois %s: %w", a, err)
+		return Caller{}, fmt.Errorf("tailscale whois %s: %w", a, withStderr(err))
 	}
 	return parseWhois(out)
 }
@@ -81,29 +85,60 @@ func parseWhois(data []byte) (Caller, error) {
 	return c, nil
 }
 
+// withStderr adds a failed command's stderr to its error: "exit status 1" alone hides the reason.
+func withStderr(err error) error {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(ee.Stderr)))
+	}
+	return err
+}
+
 // Authorizer admits requests whose connection comes from a tailnet device signed in as an allowed login.
 type Authorizer struct {
 	allow  map[string]bool
+	self   map[netip.Addr]bool // the hub machine's own addresses: see RefuseFrom
 	whois  Whois
 	now    func() time.Time
 	OnDeny func(r *http.Request, c Caller, reason string) // audit hook; may be nil
 
-	mu    sync.Mutex
-	cache map[netip.Addr]cached
+	sem      chan struct{} // limits concurrent whois lookups
+	mu       sync.Mutex
+	cache    map[netip.Addr]cached
+	inflight map[netip.Addr]*call // one lookup per address at a time; others wait for its answer
 }
 
 type cached struct {
-	c  Caller
-	at time.Time
+	c   Caller
+	err error
+	at  time.Time
+}
+
+type call struct {
+	done chan struct{}
+	c    Caller
+	err  error
 }
 
 // NewAuthorizer admits only the given logins. With none, it admits nobody.
 func NewAuthorizer(allow []string, whois Whois, now func() time.Time) *Authorizer {
-	a := &Authorizer{allow: map[string]bool{}, whois: whois, now: now, cache: map[netip.Addr]cached{}}
+	a := &Authorizer{allow: map[string]bool{}, self: map[netip.Addr]bool{}, whois: whois, now: now,
+		sem: make(chan struct{}, whoisMax), cache: map[netip.Addr]cached{}, inflight: map[netip.Addr]*call{}}
 	for _, l := range allow {
 		a.allow[strings.ToLower(l)] = true
 	}
 	return a
+}
+
+// RefuseFrom refuses connections from these addresses: the hub machine's own. A connection from the machine to
+// itself carries its own Tailscale address, and whois answers "this machine, signed in as the owner", so any local
+// program, user account or URL-fetching service would otherwise pass as the owner.
+func (a *Authorizer) RefuseFrom(ips []string) {
+	for _, s := range ips {
+		if ip, err := netip.ParseAddr(strings.TrimSpace(s)); err == nil {
+			a.self[ip.Unmap()] = true
+		}
+	}
 }
 
 // Authorize identifies r's caller from its connection address alone: headers are never consulted.
@@ -115,6 +150,9 @@ func (a *Authorizer) Authorize(r *http.Request) (Caller, error) {
 	addr := ap.Addr().Unmap()
 	if !inTailnet(addr) {
 		return Caller{Addr: addr.String()}, errors.New("not a tailnet address")
+	}
+	if a.self[addr] {
+		return Caller{Addr: addr.String()}, errors.New("request from the hub machine itself")
 	}
 	c, err := a.lookup(r.Context(), addr)
 	if err != nil {
@@ -132,19 +170,44 @@ func (a *Authorizer) Authorize(r *http.Request) (Caller, error) {
 
 func (a *Authorizer) lookup(ctx context.Context, addr netip.Addr) (Caller, error) {
 	a.mu.Lock()
-	e, ok := a.cache[addr]
-	a.mu.Unlock()
-	if ok && a.now().Sub(e.at) < whoisTTL {
-		return e.c, nil
+	if e, ok := a.cache[addr]; ok {
+		ttl := whoisTTL
+		if e.err != nil {
+			ttl = whoisFailTTL
+		}
+		if a.now().Sub(e.at) < ttl {
+			a.mu.Unlock()
+			return e.c, e.err
+		}
 	}
-	c, err := a.whois(ctx, addr)
-	if err != nil {
-		return Caller{}, err
+	if cl, ok := a.inflight[addr]; ok {
+		a.mu.Unlock()
+		select {
+		case <-cl.done:
+			return cl.c, cl.err
+		case <-ctx.Done():
+			return Caller{}, ctx.Err()
+		}
+	}
+	cl := &call{done: make(chan struct{})}
+	a.inflight[addr] = cl
+	a.mu.Unlock()
+
+	select {
+	case a.sem <- struct{}{}:
+		cl.c, cl.err = a.whois(ctx, addr)
+		<-a.sem
+	case <-ctx.Done():
+		cl.err = ctx.Err()
 	}
 	a.mu.Lock()
-	a.cache[addr] = cached{c, a.now()}
+	delete(a.inflight, addr)
+	if ctx.Err() == nil { // a caller hanging up is not an answer about the address
+		a.cache[addr] = cached{c: cl.c, err: cl.err, at: a.now()}
+	}
 	a.mu.Unlock()
-	return c, nil
+	close(cl.done)
+	return cl.c, cl.err
 }
 
 type callerKey struct{}
@@ -201,7 +264,7 @@ func TailscaleIPs(ctx context.Context) ([]string, error) {
 	}
 	out, err := exec.CommandContext(ctx, bin, "ip").Output()
 	if err != nil {
-		return nil, fmt.Errorf("tailscale ip: %w", err)
+		return nil, fmt.Errorf("tailscale ip: %w", withStderr(err))
 	}
 	return strings.Fields(string(out)), nil
 }

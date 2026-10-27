@@ -3,11 +3,13 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -99,17 +101,28 @@ func TestAccess(t *testing.T) {
 	if len(fw.calls) != 0 {
 		t.Errorf("cached owner looked up again: %v", fw.calls)
 	}
-	*clock = clock.Add(61 * time.Second)
+	*clock = clock.Add(11 * time.Second) // security L1: a short TTL, as addresses can move to another device
 	serve(a, request(ownerAddr+":5003", nil))
 	if len(fw.calls) != 1 {
-		t.Errorf("after 61 s want one fresh whois, got %v", fw.calls)
+		t.Errorf("after 11 s want one fresh whois, got %v", fw.calls)
 	}
 
-	// fail closed when whois fails
+	// fail closed when whois fails; the failure is cached for 5 s
 	fw.err = errors.New("tailscaled down")
-	*clock = clock.Add(61 * time.Second)
-	if code, _ := serve(a, request(ownerAddr+":5004", nil)); code != http.StatusForbidden {
-		t.Errorf("whois failure: %d, want 403", code)
+	*clock = clock.Add(11 * time.Second)
+	fw.calls = nil
+	for i := 0; i < 3; i++ {
+		if code, _ := serve(a, request(ownerAddr+":5004", nil)); code != http.StatusForbidden {
+			t.Errorf("whois failure: %d, want 403", code)
+		}
+	}
+	if len(fw.calls) != 1 {
+		t.Errorf("failed lookups: %d whois calls, want 1 (cached)", len(fw.calls))
+	}
+	*clock = clock.Add(6 * time.Second)
+	serve(a, request(ownerAddr+":5005", nil))
+	if len(fw.calls) != 2 {
+		t.Errorf("after 6 s the failure must be retried: %d calls", len(fw.calls))
 	}
 
 	// an empty allow list refuses everyone
@@ -187,5 +200,63 @@ func TestListenAddrs(t *testing.T) {
 		} else if len(bad) > 0 && !strings.Contains(err.Error(), "Tailscale") {
 			t.Errorf("%v: unhelpful error %v", bad, err)
 		}
+	}
+}
+
+// security M1: a program on the hub machine reaches it from the machine's own Tailscale address, which whois
+// reports as the owner; it must be refused before whois.
+func TestAccessRefusesSelf(t *testing.T) {
+	a, fw, _ := newAuth(t)
+	fw.callers["100.64.0.10"] = Caller{Login: "owner@example.com", Device: "mini"}
+	a.RefuseFrom([]string{"100.64.0.10", "fd7a:115c:a1e0::10"})
+	for _, remote := range []string{"100.64.0.10:5000", "[fd7a:115c:a1e0::10]:5000", "[::ffff:100.64.0.10]:5000"} {
+		if code, _ := serve(a, request(remote, nil)); code != http.StatusForbidden {
+			t.Errorf("%s: %d, want 403", remote, code)
+		}
+	}
+	if len(fw.calls) != 0 {
+		t.Errorf("self requests reached whois: %v", fw.calls)
+	}
+	if code, _ := serve(a, request(ownerAddr+":5000", nil)); code != 200 {
+		t.Errorf("owner still admitted: %d", code)
+	}
+}
+
+// security M4: a burst from one address makes one whois; bursts from many addresses run at most whoisMax at once
+func TestWhoisLimits(t *testing.T) {
+	var mu sync.Mutex
+	calls, running, peak := 0, 0, 0
+	slow := func(_ context.Context, a netip.Addr) (Caller, error) {
+		mu.Lock()
+		calls++
+		running++
+		if running > peak {
+			peak = running
+		}
+		mu.Unlock()
+		time.Sleep(30 * time.Millisecond)
+		mu.Lock()
+		running--
+		mu.Unlock()
+		return Caller{Login: "someone@else.com"}, nil
+	}
+	a := NewAuthorizer([]string{"owner@example.com"}, slow, time.Now)
+	var wg sync.WaitGroup
+	for i := 0; i < 200; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); serve(a, request(strangerAddr+":5000", nil)) }()
+	}
+	wg.Wait()
+	if calls != 1 {
+		t.Errorf("200 requests from one address made %d whois calls, want 1", calls)
+	}
+	calls, peak = 0, 0
+	for i := 0; i < 40; i++ {
+		wg.Add(1)
+		go func(i int) { defer wg.Done(); serve(a, request(fmt.Sprintf("100.64.1.%d:5000", i), nil)) }(i)
+	}
+	wg.Wait()
+	if calls != 40 || peak > whoisMax {
+		t.Errorf("40 addresses: %d calls, peak %d concurrent (max %d)", calls, peak, whoisMax)
 	}
 }

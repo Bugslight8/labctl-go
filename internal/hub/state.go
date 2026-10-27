@@ -4,7 +4,10 @@ package hub
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,6 +55,10 @@ type Monitor struct {
 	dial   func(ctx context.Context, addr string) error
 	now    func() time.Time
 
+	// Boot is random per start: event numbers restart at 1 with the hub, so a client that sees a new Boot starts
+	// over from since=0 instead of skipping events.
+	Boot string
+
 	mu      sync.Mutex
 	hosts   map[string]HostState
 	events  []Event
@@ -62,7 +69,10 @@ type Monitor struct {
 // NewMonitor watches inv's hosts. dial probes host:port and returns nil when something answers.
 func NewMonitor(inv *inventory.Inventory, status func(context.Context) (*tailnet.Status, error),
 	dial func(ctx context.Context, addr string) error, now func() time.Time) *Monitor {
-	return &Monitor{inv: inv, status: status, dial: dial, now: now, hosts: map[string]HostState{}, changed: make(chan struct{})}
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return &Monitor{inv: inv, status: status, dial: dial, now: now, Boot: hex.EncodeToString(b),
+		hosts: map[string]HostState{}, changed: make(chan struct{})}
 }
 
 // DialTCP is the real port probe.
@@ -89,6 +99,10 @@ func (m *Monitor) Poll(ctx context.Context) error {
 	results := make([]result, len(m.inv.Hosts))
 	var wg sync.WaitGroup
 	for i, h := range m.inv.Hosts {
+		if isSelf(st.Self, h.Tailnet) { // the machine the hub runs on: tailscale lists it as Self, not as a peer
+			results[i] = result{h: h, p: st.Self, state: Up}
+			continue
+		}
 		p, ok := st.Lookup(h.Tailnet)
 		results[i] = result{h: h, p: p, state: NotOnTailnet}
 		switch {
@@ -129,6 +143,11 @@ func (m *Monitor) Run(ctx context.Context, every time.Duration, logf func(string
 	}
 }
 
+func isSelf(self tailnet.Peer, name string) bool {
+	full := strings.TrimSuffix(name, ".")
+	return self.Name != "" && (strings.EqualFold(self.Name, full) || strings.EqualFold(self.DNSName, full))
+}
+
 func (m *Monitor) update(name string, s State, p tailnet.Peer) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -138,13 +157,6 @@ func (m *Monitor) update(name string, s State, p tailnet.Peer) {
 	if !seen || h.State != s {
 		m.recordLocked(name, s)
 	}
-}
-
-// record sets a host's state and appends the event.
-func (m *Monitor) record(name string, s State) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.recordLocked(name, s)
 }
 
 func (m *Monitor) recordLocked(name string, s State) {
@@ -174,21 +186,8 @@ func (m *Monitor) Hosts() []HostState {
 	return out
 }
 
-// Last is the newest event's Seq (0 before the first poll).
-func (m *Monitor) Last() uint64 {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.seq
-}
-
-// Events returns the retained events with Seq > since. When since is older than the oldest retained event, the
-// first returned Seq is greater than since+1, so the client can see that it missed some.
-func (m *Monitor) Events(since uint64) []Event {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.eventsLocked(since)
-}
-
+// eventsLocked returns the retained events with Seq > since. When since is older than the oldest retained event,
+// the first returned Seq is greater than since+1, so the client can see that it missed some.
 func (m *Monitor) eventsLocked(since uint64) []Event {
 	var out []Event
 	for _, e := range m.events {
@@ -199,18 +198,23 @@ func (m *Monitor) eventsLocked(since uint64) []Event {
 	return out
 }
 
-// Wait returns the events after since, blocking until there is at least one or ctx ends (then it returns none).
-func (m *Monitor) Wait(ctx context.Context, since uint64) []Event {
+// Wait returns the events after since and the newest Seq, read under one lock so that asking since=last next time
+// never skips an event. It blocks until there is at least one event or ctx ends (then it returns none).
+// A since beyond the newest Seq comes from before a hub restart: it counts as 0.
+func (m *Monitor) Wait(ctx context.Context, since uint64) ([]Event, uint64) {
 	for {
 		m.mu.Lock()
-		ev, ch := m.eventsLocked(since), m.changed
+		if since > m.seq {
+			since = 0
+		}
+		ev, last, ch := m.eventsLocked(since), m.seq, m.changed
 		m.mu.Unlock()
 		if len(ev) > 0 {
-			return ev
+			return ev, last
 		}
 		select {
 		case <-ctx.Done():
-			return nil
+			return nil, last
 		case <-ch:
 		}
 	}

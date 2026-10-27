@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -33,6 +34,7 @@ name = "nas"
 // fakeLab is a tailnet plus a set of hosts whose port 22 answers; the test changes both between polls.
 type fakeLab struct {
 	mu        sync.Mutex
+	self      tailnet.Peer // the hub's own machine
 	peers     []tailnet.Peer
 	sshOK     map[string]bool // IP -> port 22 answers
 	statusErr error
@@ -41,11 +43,11 @@ type fakeLab struct {
 
 func newFakeLab() *fakeLab {
 	return &fakeLab{
+		self: tailnet.Peer{Name: "mini", DNSName: "mini.tail0000.ts.net", Online: true, IP: "100.64.0.10", OS: "macos"},
 		peers: []tailnet.Peer{
-			{Name: "mini", DNSName: "mini.tail0000.ts.net", Online: true, IP: "100.64.0.2", OS: "macos"},
 			{Name: "fabric-twin", DNSName: "fabric-twin.tail0000.ts.net", Online: true, IP: "100.64.0.3", OS: "windows"},
 		},
-		sshOK: map[string]bool{"100.64.0.2": true},
+		sshOK: map[string]bool{},
 		clock: t0,
 	}
 }
@@ -56,7 +58,7 @@ func (f *fakeLab) status(context.Context) (*tailnet.Status, error) {
 	if f.statusErr != nil {
 		return nil, f.statusErr
 	}
-	return &tailnet.Status{Suffix: "tail0000.ts.net", Peers: append([]tailnet.Peer(nil), f.peers...)}, nil
+	return &tailnet.Status{Self: f.self, Suffix: "tail0000.ts.net", Peers: append([]tailnet.Peer(nil), f.peers...)}, nil
 }
 
 func (f *fakeLab) dial(_ context.Context, addr string) error {
@@ -94,6 +96,19 @@ func newMonitor(t *testing.T) (*Monitor, *fakeLab) {
 	return NewMonitor(inv, lab.status, lab.dial, lab.now), lab
 }
 
+// record and Events are test helpers: production code only records from Poll and reads through Wait.
+func (m *Monitor) record(name string, s State) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recordLocked(name, s)
+}
+
+func (m *Monitor) Events(since uint64) []Event {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.eventsLocked(since)
+}
+
 func states(m *Monitor) map[string]State {
 	out := map[string]State{}
 	for _, h := range m.Hosts() {
@@ -107,6 +122,7 @@ func TestPoll(t *testing.T) {
 	if err := m.Poll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	// mini is the hub's own machine (tailscale's Self): up without a probe
 	want := map[string]State{"mini": Up, "fabric-twin": Unreachable, "nas": NotOnTailnet}
 	for name, s := range want {
 		if got := states(m)[name]; got != s {
@@ -173,11 +189,11 @@ func TestEvents(t *testing.T) {
 
 	// Wait returns at once when there is news, blocks until a new event otherwise, and gives up with ctx
 	last := ev[len(ev)-1].Seq
-	if got := m.Wait(context.Background(), last-1); len(got) != 1 {
-		t.Errorf("Wait with news = %d events", len(got))
+	if got, l := m.Wait(context.Background(), last-1); len(got) != 1 || l != last {
+		t.Errorf("Wait with news = %d events, last %d", len(got), l)
 	}
 	done := make(chan []Event)
-	go func() { done <- m.Wait(context.Background(), last) }()
+	go func() { ev, _ := m.Wait(context.Background(), last); done <- ev }()
 	time.Sleep(20 * time.Millisecond)
 	m.record("h", "new")
 	select {
@@ -190,7 +206,42 @@ func TestEvents(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
-	if got := m.Wait(ctx, last+1); len(got) != 0 {
+	if got, _ := m.Wait(ctx, last+1); len(got) != 0 {
 		t.Errorf("Wait past ctx = %+v", got)
+	}
+	// a since from before a hub restart (beyond the newest Seq) counts as 0: everything retained, at once
+	if got, _ := m.Wait(context.Background(), last+1000); len(got) != maxEvents {
+		t.Errorf("stale since: %d events", len(got))
+	}
+}
+
+// review 2: events and Last come from one snapshot, so a client asking since=Last never skips one
+func TestWaitNoGap(t *testing.T) {
+	m, _ := newMonitor(t)
+	const n = maxEvents - 100 // below the ring size: a gap can only come from the snapshot, not from eviction
+	go func() {
+		for i := 0; i < n; i++ {
+			m.record("h", State(fmt.Sprint(i)))
+		}
+	}()
+	var since uint64
+	seen := 0
+	for seen < n {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		ev, last := m.Wait(ctx, since)
+		cancel()
+		if len(ev) == 0 {
+			t.Fatalf("stalled at %d/%d", seen, n)
+		}
+		for _, e := range ev {
+			if e.Seq != since+1 {
+				t.Fatalf("gap: got seq %d after %d", e.Seq, since)
+			}
+			since = e.Seq
+			seen++
+		}
+		if last != since {
+			t.Fatalf("last %d but delivered up to %d: asking since=last would skip", last, since)
+		}
 	}
 }

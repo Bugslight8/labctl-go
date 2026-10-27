@@ -105,9 +105,18 @@ func TestHubEndToEnd(t *testing.T) {
 		t.Fatalf("listened on %v, want exactly the two Tailscale addresses on port 7300", requested)
 	}
 
+	// clients address the hub by its MagicDNS name; the loopback URL only carries the connection
+	newReq := func(method, url string) *http.Request {
+		req, err := http.NewRequest(method, url, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = "mini:7300"
+		return req
+	}
 	get := func(url string, v any) int {
 		t.Helper()
-		resp, err := http.Get(url)
+		resp, err := http.DefaultClient.Do(newReq("GET", url))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -131,6 +140,7 @@ func TestHubEndToEnd(t *testing.T) {
 	}
 
 	// a live event reaches a waiting long poll
+	var r0 EventsResponse
 	live := make(chan EventsResponse, 1)
 	go func() {
 		var r EventsResponse
@@ -141,6 +151,7 @@ func TestHubEndToEnd(t *testing.T) {
 	lab.setOnline("fabric-twin", false)
 	select {
 	case r := <-live:
+		r0 = r
 		if len(r.Events) != 1 || r.Events[0].Host != "fabric-twin" || r.Events[0].To != "asleep" {
 			t.Errorf("live events %+v", r)
 		}
@@ -149,7 +160,7 @@ func TestHubEndToEnd(t *testing.T) {
 	}
 
 	// the owner wakes a host; the hub sends the inventory MAC itself
-	req, _ := http.NewRequest("POST", ownerURL+"/v1/wake/fabric-twin", nil)
+	req := newReq("POST", ownerURL+"/v1/wake/fabric-twin")
 	req.Header.Set("X-Labctl", "1")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -168,19 +179,31 @@ func TestHubEndToEnd(t *testing.T) {
 		t.Errorf("stranger: %d", code)
 	}
 
-	// stopping must be prompt even with a long poll waiting and a connection that never sent a request
-	// (Go's server otherwise waits up to the poll's end, or 5 s, for each)
-	idle, err := net.Dial("tcp", strings.TrimPrefix(ownerURL, "http://"))
-	if err != nil {
-		t.Fatal(err)
+	// a page served under another name (DNS rebinding) gets nothing, even from the owner's device
+	rebind := newReq("GET", ownerURL+"/v1/hosts")
+	rebind.Host = "evil.example:7300"
+	if resp, err := http.DefaultClient.Do(rebind); err != nil || resp.StatusCode != http.StatusForbidden {
+		t.Errorf("rebinding: %v %v", resp, err)
 	}
-	defer idle.Close()
+
+	// security M2: headers are capped at 8 KB
+	big := newReq("GET", ownerURL+"/v1/hosts")
+	big.Header.Set("X-Pad", strings.Repeat("x", 20<<10))
+	if resp, err := http.DefaultClient.Do(big); err != nil || resp.StatusCode != http.StatusRequestHeaderFieldsTooLarge {
+		t.Errorf("20 KB header: %v %v", resp, err)
+	}
+
+	// stopping must be prompt with a long poll waiting (LongPoll is 30 s): the poll ends with the hub's context,
+	// well inside the 2 s shutdown grace. Idle keep-alive connections are closed by Shutdown at once.
+	http.DefaultClient.CloseIdleConnections()
+	polled := make(chan struct{})
 	go func() {
-		if resp, err := http.Get(ownerURL + "/v1/events?since=999999"); err == nil {
+		defer close(polled)
+		if resp, err := http.DefaultClient.Do(newReq("GET", ownerURL+"/v1/events?since="+itoa(ev.Last+1)+"&boot="+r0.Boot)); err == nil {
 			resp.Body.Close()
 		}
 	}()
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	stopAt := time.Now()
 	cancel()
 	select {
@@ -191,9 +214,10 @@ func TestHubEndToEnd(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("hub did not stop within 3 s")
 	}
-	if d := time.Since(stopAt); d > 2500*time.Millisecond {
-		t.Errorf("stop took %v", d)
+	if d := time.Since(stopAt); d > time.Second {
+		t.Errorf("stop took %v with a long poll waiting, want under 1 s", d)
 	}
+	<-polled
 	audit, _ := os.ReadFile(filepath.Join(state, "audit.jsonl"))
 	if !strings.Contains(string(audit), `"action":"wake","host":"fabric-twin","result":"sent"`) || !strings.Contains(string(audit), "someone@else.com") {
 		t.Errorf("audit log:\n%s", audit)

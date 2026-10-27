@@ -51,6 +51,11 @@ func Serve(ctx context.Context, o Options) error {
 	if err != nil {
 		return err
 	}
+	st, err := o.Status(ctx) // the hub's own MagicDNS names, which clients put in the Host header
+	if err != nil {
+		return err
+	}
+	allowedHosts := append([]string{st.Self.Name, st.Self.DNSName}, ips...)
 	audit, err := OpenAudit(o.StateDir, o.Now)
 	if err != nil {
 		return err
@@ -61,8 +66,10 @@ func Serve(ctx context.Context, o Options) error {
 	}
 
 	mon := NewMonitor(inv, o.Status, o.Dial, o.Now)
-	srv := &Server{Inv: inv, Mon: mon, Auth: NewAuthorizer(inv.Hub.Allow, o.Whois, o.Now), Audit: audit,
-		SendWOL: o.SendWOL, Now: o.Now, LongPoll: o.LongPoll}
+	auth := NewAuthorizer(inv.Hub.Allow, o.Whois, o.Now)
+	auth.RefuseFrom(ips)
+	srv := &Server{Inv: inv, Mon: mon, Auth: auth, Audit: audit, SendWOL: o.SendWOL, Now: o.Now,
+		LongPoll: o.LongPoll, AllowedHosts: allowedHosts}
 	handler := srv.Handler()
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -77,7 +84,7 @@ func Serve(ctx context.Context, o Options) error {
 			}
 			return fmt.Errorf("listen %s: %w", addr, err)
 		}
-		hs := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second,
+		hs := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, MaxHeaderBytes: 8 << 10,
 			WriteTimeout: o.LongPoll + 10*time.Second, IdleTimeout: 60 * time.Second,
 			// requests inherit ctx, so a waiting long poll ends as soon as the hub stops
 			BaseContext: func(net.Listener) context.Context { return ctx }}
