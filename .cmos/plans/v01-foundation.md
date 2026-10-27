@@ -75,8 +75,8 @@ and `cmos check --quick` prints `CHECK: OK`.
 ### M2: SSH runner, `<host> [cmd]`, `off`
 | # | Status | Files | Acceptance check |
 |---|---|---|---|
-| 4 | todo | NEW `internal/sshx/sshx.go`, NEW `internal/sshx/sshx_test.go` | `go test ./internal/sshx` passes, including TestQuoteRoundTrip and TestControlDirPerms |
-| 5 | todo | `internal/cli/cli.go`, NEW `internal/cli/run_test.go` | `go test ./internal/cli -run 'TestRun|TestShell|TestOff|TestExitCode'` passes |
+| 4 | done | NEW `internal/sshx/sshx.go`, NEW `internal/sshx/sshx_test.go` | `go test ./internal/sshx` passes, including TestQuoteRoundTrip and TestControlDirPerms |
+| 5 | done | `internal/cli/cli.go`, NEW `internal/cli/run_test.go` | `go test ./internal/cli -run 'TestRun|TestShell|TestOff|TestExitCode'` passes |
 
 ### M3: wake through the relay, auto-wake, end-to-end test
 | # | Status | Files | Acceptance check |

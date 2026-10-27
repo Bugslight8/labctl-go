@@ -16,11 +16,13 @@ const version = "0.1.0-dev"
 func main() {
 	cli.Version = version
 	app := &cli.App{
-		Stdout:    os.Stdout,
-		Stderr:    os.Stderr,
-		HostsPath: inventory.Path(),
-		Status:    tailnet.Query,
-		Now:       time.Now,
+		Stdout:     os.Stdout,
+		Stderr:     os.Stderr,
+		HostsPath:  inventory.Path(),
+		Status:     tailnet.Query,
+		Now:        time.Now,
+		ControlDir: cli.DefaultControlDir(),
+		Exec:       cli.SystemExec,
 	}
 	os.Exit(app.Run(context.Background(), os.Args[1:]))
 }

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Bugslight8/labctl/internal/inventory"
+	"github.com/Bugslight8/labctl/internal/sshx"
 	"github.com/Bugslight8/labctl/internal/tailnet"
 )
 
@@ -27,6 +28,8 @@ type App struct {
 	HostsPath      string
 	Status         func(context.Context) (*tailnet.Status, error)
 	Now            func() time.Time
+	ControlDir     string                                                // where the shared SSH connection sockets live
+	Exec           func(ctx context.Context, argv []string) (int, error) // runs ssh with this terminal; returns its exit code
 }
 
 const usage = `labctl - command center for the home lab
@@ -78,8 +81,66 @@ func (a *App) run(ctx context.Context, args []string) error {
 	case "help", "-h", "--help":
 		fmt.Fprint(a.Stdout, usage)
 		return nil
+	case "off":
+		return a.off(ctx, args[1:])
 	}
-	return fmt.Errorf("unknown command or host %q (labctl help)", args[0])
+	return a.onHost(ctx, args[0], args[1:])
+}
+
+// onHost opens a shell on the host (no cmd) or runs cmd there, passing its exit code through.
+func (a *App) onHost(ctx context.Context, name string, cmd []string) error {
+	inv, err := a.inventory()
+	if err != nil {
+		return err
+	}
+	h, ok := inv.Find(name)
+	if !ok {
+		return fmt.Errorf("unknown command or host %q (labctl help; hosts are in %s)", name, a.HostsPath)
+	}
+	if err := sshx.EnsureControlDir(a.ControlDir); err != nil {
+		return err
+	}
+	argv := sshx.Argv(h, a.ControlDir, sshx.ShellCommand(h), true)
+	if len(cmd) > 0 {
+		argv = sshx.Argv(h, a.ControlDir, sshx.RemoteCommand(cmd), false)
+	}
+	return a.exec(ctx, argv)
+}
+
+func (a *App) exec(ctx context.Context, argv []string) error {
+	code, err := a.Exec(ctx, argv)
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		return exitCode(code)
+	}
+	return nil
+}
+
+// off closes the shared connection of one host, or of every host. A host with no open connection is not an error.
+func (a *App) off(ctx context.Context, names []string) error {
+	inv, err := a.inventory()
+	if err != nil {
+		return err
+	}
+	hosts := inv.Hosts
+	if len(names) > 0 {
+		hosts = nil
+		for _, n := range names {
+			h, ok := inv.Find(n)
+			if !ok {
+				return fmt.Errorf("unknown host %q", n)
+			}
+			hosts = append(hosts, h)
+		}
+	}
+	for _, h := range hosts {
+		if code, err := a.Exec(ctx, sshx.OffArgv(h, a.ControlDir)); err == nil && code == 0 {
+			fmt.Fprintf(a.Stdout, "closed %s\n", h.Name)
+		}
+	}
+	return nil
 }
 
 func (a *App) inventory() (*inventory.Inventory, error) {
