@@ -1,0 +1,1 @@
+- [Defect patterns](defect_patterns.md) — labctl recurring bugs: stdout pollution, swallowed loop errors, per-item validation, lost stderr

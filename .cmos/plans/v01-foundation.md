@@ -1,7 +1,7 @@
 ---
 slug: v01-foundation
 title: labctl v0.1 - hosts inventory, ls, wake, run and shell on any host (direct mode)
-status: building
+status: ready
 tier: sensitive
 created: 2026-10-26
 depends:

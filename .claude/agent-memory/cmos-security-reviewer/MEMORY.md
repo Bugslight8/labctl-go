@@ -1,0 +1,1 @@
+- [labctl trust boundaries](trust-boundaries.md) — ssh argv/`--`, quoting, relay wol, control dir, peer-chosen tailnet fields; v0.1 findings
