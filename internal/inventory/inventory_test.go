@@ -163,3 +163,38 @@ func TestHubTable(t *testing.T) {
 		}
 	}
 }
+
+func TestHubHost(t *testing.T) {
+	inv, err := Parse([]byte("hub_host = \"mini\"\n"))
+	if err != nil || inv.HubHost != "mini" || inv.HubPort != DefaultHubPort || len(inv.Hosts) != 0 {
+		t.Fatalf("client file: %+v %v", inv, err)
+	}
+	inv, err = Parse([]byte("hub_host = \"mini.tail0000.ts.net\"\nhub_port = 8000\n"))
+	if err != nil || inv.HubPort != 8000 {
+		t.Errorf("full name and port: %+v %v", inv, err)
+	}
+	for _, bad := range []string{"hub_host = \"-oProxyCommand=x\"\n", "hub_host = \"a b\"\n", "hub_host = \"mini\"\nhub_port = 0\n"} {
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+// CheckHost is the rule Parse applies to each host; the hub client applies it to every host the hub sends.
+func TestCheckHost(t *testing.T) {
+	ok := Host{Name: "korg", Tailnet: "korg", User: "krish", Tmux: "main"}
+	if err := CheckHost(ok); err != nil {
+		t.Errorf("valid host: %v", err)
+	}
+	for _, h := range []Host{
+		{Name: "-oProxyCommand=x", Tailnet: "a"},
+		{Name: "a", Tailnet: "-oX"},
+		{Name: "a", Tailnet: "a", User: "root@evil"},
+		{Name: "a", Tailnet: "a", Tmux: "x;reboot"},
+		{Name: "", Tailnet: "a"},
+	} {
+		if err := CheckHost(h); err == nil {
+			t.Errorf("%+v accepted", h)
+		}
+	}
+}

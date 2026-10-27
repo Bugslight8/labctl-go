@@ -1,7 +1,7 @@
 ---
 slug: v02b-hub-client
 title: labctl v0.2b - every device uses the hub (ls, wake, watch), with a cached direct-mode fallback
-status: approved
+status: building
 tier: sensitive
 created: 2026-10-26
 depends: v02a-hub
@@ -9,18 +9,20 @@ depends: v02a-hub
 # Plan: labctl v0.2b - every device uses the hub (ls, wake, watch), with a cached direct-mode fallback
 
 ## Goal
-On the MacBook, a client hosts file with only `hub = "<mini>"` is enough: `labctl ls` shows the hub's live state and
+On the MacBook, a client hosts file with only `hub_host = "<mini>"` is enough: `labctl ls` shows the hub's live state and
 history, `labctl wake` asks the hub, `labctl watch` streams events live, and `labctl <host>` uses the hub's hosts list.
 When the hub is down, labctl says so once and works in direct mode from its cached copy.
 
 ## Finish line
-`go test ./cmd/labctl -run 'TestEndToEndHub' -v` prints `--- PASS: TestEndToEndHub` (real binary against an
-in-process hub with fake whois and status: ls, wake, watch, and fallback after the hub stops), and
+`go test ./cmd/labctl -run 'TestEndToEndHub' -v` prints `--- PASS: TestEndToEndHub` (main's real App wiring, with
+only the network dialer swapped, against an in-process hub with fake whois and status: ls, wake, watch, and fallback
+after the hub stops; the binary itself cannot reach a test hub without an address override that would bypass T2), and
 `cmos check --quick` prints `CHECK: OK`.
 
 ## Design
-- Client hosts file: `hub = "<host>"` (and optional `hub_port`); hosts may be left out. With a hub, the hub's list wins,
-  and local entries are only the fallback.
+- Client hosts file: `hub_host = "<host>"` (and optional `hub_port`, default 7300); hosts may be left out. (Not `hub`:
+  the hub's own file has a `[hub]` table, and TOML cannot hold both.) With a hub, the hub's list wins, and local
+  entries are only the fallback.
 - `internal/hubclient`: GET /v1/hosts, GET /v1/events (long poll), POST /v1/wake with `X-Labctl: 1`; 3 s timeout
   except the long poll. Cache: the last /v1/hosts answer in `~/.cache/labctl/hosts.json` (0600), used when the hub is
   unreachable, with a one-line notice naming the hub and how old the cache is.
@@ -43,7 +45,7 @@ in-process hub with fake whois and status: ls, wake, watch, and fallback after t
 ### M1: hub client and cache
 | # | Status | Files | Acceptance check |
 |---|---|---|---|
-| 1 | todo | NEW `internal/hubclient/client.go`, NEW `internal/hubclient/client_test.go`, `internal/inventory/inventory.go` | `go test ./internal/hubclient` passes, including TestRejectsUnsafeHostList and TestHubAddress |
+| 1 | done | NEW `internal/hubclient/client.go`, NEW `internal/hubclient/client_test.go`, `internal/inventory/inventory.go` | `go test ./internal/hubclient` passes, including TestRejectsUnsafeHostList and TestHubAddress |
 
 ### M2: ls, wake and <host> through the hub, with fallback
 | # | Status | Files | Acceptance check |

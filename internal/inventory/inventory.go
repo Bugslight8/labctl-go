@@ -27,6 +27,8 @@ type Host struct {
 	OS      string // informational: macos, linux, windows
 	MAC     string // canonical aa:bb:cc:dd:ee:ff, or empty when the host cannot be woken
 	Tmux    string // session to attach; empty = a plain login shell
+
+	HubWakeable bool // from the hub's host list: the hub holds the MAC and wakes the host itself
 }
 
 // Inventory is the parsed hosts file.
@@ -34,6 +36,9 @@ type Inventory struct {
 	Relay string // name of the host that sends wake packets; empty = no waking
 	Hosts []Host
 	Hub   *Hub // the [hub] table: only the hub's own hosts file has one
+
+	HubHost string // client side: the hub to use (its MagicDNS name); empty = direct mode only
+	HubPort int
 }
 
 // Hub configures `labctl hub`.
@@ -43,9 +48,11 @@ type Hub struct {
 }
 
 type file struct {
-	Relay string    `toml:"relay"`
-	Host  []rawHost `toml:"host"`
-	Hub   *rawHub   `toml:"hub"`
+	HubHost string    `toml:"hub_host"`
+	HubPort *int      `toml:"hub_port"`
+	Relay   string    `toml:"relay"`
+	Host    []rawHost `toml:"host"`
+	Hub     *rawHub   `toml:"hub"`
 }
 
 type rawHub struct {
@@ -101,7 +108,16 @@ func Parse(data []byte) (*Inventory, error) {
 	if extra := md.Undecoded(); len(extra) > 0 {
 		return nil, fmt.Errorf("unknown key %q", extra[0].String())
 	}
-	inv := &Inventory{Relay: f.Relay}
+	inv := &Inventory{Relay: f.Relay, HubHost: f.HubHost, HubPort: DefaultHubPort}
+	if inv.HubHost != "" && !safe.MatchString(inv.HubHost) {
+		return nil, fmt.Errorf("hub_host %q: use a MagicDNS name such as \"mini\"", inv.HubHost)
+	}
+	if f.HubPort != nil {
+		if *f.HubPort < 1 || *f.HubPort > 65535 {
+			return nil, fmt.Errorf("hub_port %d is not 1-65535", *f.HubPort)
+		}
+		inv.HubPort = *f.HubPort
+	}
 	if f.Hub != nil {
 		hub, err := parseHub(f.Hub)
 		if err != nil {
@@ -118,17 +134,8 @@ func Parse(data []byte) (*Inventory, error) {
 		if r.Tmux != nil {
 			h.Tmux = *r.Tmux
 		}
-		fields := [][2]string{{"name", h.Name}, {"tailnet", h.Tailnet}}
-		if h.User != "" {
-			fields = append(fields, [2]string{"user", h.User})
-		}
-		if h.Tmux != "" {
-			fields = append(fields, [2]string{"tmux", h.Tmux})
-		}
-		for _, f := range fields {
-			if !safe.MatchString(f[1]) {
-				return nil, fmt.Errorf("host %d: %s %q: use letters, digits, '.', '_' or '-', not starting with '-' or '.'", i+1, f[0], f[1])
-			}
+		if err := CheckHost(h); err != nil {
+			return nil, fmt.Errorf("host %d: %w", i+1, err)
 		}
 		if r.MAC != "" {
 			hw, err := net.ParseMAC(r.MAC)
@@ -152,6 +159,24 @@ func Parse(data []byte) (*Inventory, error) {
 		inv.Relay = r.Name // callers compare host names
 	}
 	return inv, nil
+}
+
+// CheckHost enforces the shape of every field that reaches an ssh argv or a remote command. Parse applies it to the
+// hosts file; the hub client applies it to every host the hub (or the cache of its answer) supplies.
+func CheckHost(h Host) error {
+	fields := [][2]string{{"name", h.Name}, {"tailnet", h.Tailnet}}
+	if h.User != "" {
+		fields = append(fields, [2]string{"user", h.User})
+	}
+	if h.Tmux != "" {
+		fields = append(fields, [2]string{"tmux", h.Tmux})
+	}
+	for _, f := range fields {
+		if !safe.MatchString(f[1]) {
+			return fmt.Errorf("%s %q: use letters, digits, '.', '_' or '-', not starting with '-' or '.'", f[0], f[1])
+		}
+	}
+	return nil
 }
 
 func parseHub(r *rawHub) (*Hub, error) {

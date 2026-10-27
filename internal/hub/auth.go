@@ -29,7 +29,8 @@ var tailnetRanges = []netip.Prefix{
 	netip.MustParsePrefix("fd7a:115c:a1e0::/48"),
 }
 
-func inTailnet(a netip.Addr) bool {
+// InTailnet reports whether a is in the ranges Tailscale assigns addresses from.
+func InTailnet(a netip.Addr) bool {
 	for _, p := range tailnetRanges {
 		if p.Contains(a.Unmap()) {
 			return true
@@ -149,7 +150,7 @@ func (a *Authorizer) Authorize(r *http.Request) (Caller, error) {
 		return Caller{}, fmt.Errorf("bad remote address %q", r.RemoteAddr)
 	}
 	addr := ap.Addr().Unmap()
-	if !inTailnet(addr) {
+	if !InTailnet(addr) {
 		return Caller{Addr: addr.String()}, errors.New("not a tailnet address")
 	}
 	if a.self[addr] {
@@ -250,7 +251,7 @@ func ListenAddrs(ips []string, port int) ([]string, error) {
 	var out []string
 	for _, s := range ips {
 		a, err := netip.ParseAddr(strings.TrimSpace(s))
-		if err != nil || !inTailnet(a) {
+		if err != nil || !InTailnet(a) {
 			return nil, fmt.Errorf("%q is not a Tailscale address: the hub listens only on the tailnet", s)
 		}
 		out = append(out, net.JoinHostPort(a.String(), fmt.Sprint(port)))
