@@ -17,6 +17,7 @@ import (
 // Peer is one tailnet device.
 type Peer struct {
 	Name     string // first label of the MagicDNS name: what `ssh <name>` resolves
+	DNSName  string // full MagicDNS name without the trailing dot; peers shared in from another tailnet differ here
 	HostName string // the device's own host name (often DESKTOP-XYZ on Windows)
 	OS       string // lowercased: macos, linux, windows, ios, ...
 	Online   bool
@@ -26,8 +27,9 @@ type Peer struct {
 
 // Status is this machine's view of the tailnet.
 type Status struct {
-	Self  Peer
-	Peers []Peer // sorted by Name
+	Self   Peer
+	Peers  []Peer // sorted by Name, then DNSName
+	Suffix string // this tailnet's MagicDNS suffix, e.g. tail0000.ts.net
 }
 
 type rawPeer struct {
@@ -40,14 +42,16 @@ type rawPeer struct {
 }
 
 type rawStatus struct {
-	BackendState string
-	Self         rawPeer
-	Peer         map[string]rawPeer
+	BackendState   string
+	MagicDNSSuffix string
+	Self           rawPeer
+	Peer           map[string]rawPeer
 }
 
 func (r rawPeer) peer() Peer {
 	p := Peer{HostName: r.HostName, OS: strings.ToLower(r.OS), Online: r.Online, LastSeen: r.LastSeen}
-	p.Name, _, _ = strings.Cut(strings.TrimSuffix(r.DNSName, "."), ".")
+	p.DNSName = strings.TrimSuffix(r.DNSName, ".")
+	p.Name, _, _ = strings.Cut(p.DNSName, ".")
 	if p.Name == "" {
 		p.Name = strings.ToLower(r.HostName)
 	}
@@ -68,21 +72,50 @@ func Parse(r io.Reader) (*Status, error) {
 	if raw.BackendState != "" && raw.BackendState != "Running" {
 		return nil, fmt.Errorf("tailscale is %s on this machine: run `tailscale up`", raw.BackendState)
 	}
-	s := &Status{Self: raw.Self.peer()}
+	s := &Status{Self: raw.Self.peer(), Suffix: strings.Trim(raw.MagicDNSSuffix, ".")}
 	for _, rp := range raw.Peer {
 		s.Peers = append(s.Peers, rp.peer())
 	}
-	sort.Slice(s.Peers, func(i, j int) bool { return s.Peers[i].Name < s.Peers[j].Name })
+	sortPeers(s.Peers)
 	return s, nil
 }
 
-// Lookup finds a peer by MagicDNS name (short or full) or by its own host name, ignoring case.
+// sortPeers orders by Name, then full DNSName, so equal first labels never depend on JSON map order.
+func sortPeers(ps []Peer) {
+	sort.Slice(ps, func(i, j int) bool {
+		if ps[i].Name != ps[j].Name {
+			return ps[i].Name < ps[j].Name
+		}
+		return ps[i].DNSName < ps[j].DNSName
+	})
+}
+
+// Lookup finds a peer by full MagicDNS name, by short name (preferring this tailnet's node over ones shared in
+// from other tailnets), or by its own host name, ignoring case.
 func (s *Status) Lookup(q string) (Peer, bool) {
-	short, _, _ := strings.Cut(strings.TrimSuffix(q, "."), ".")
-	for _, p := range s.Peers {
-		if strings.EqualFold(p.Name, short) {
+	full := strings.TrimSuffix(q, ".")
+	short, _, dotted := strings.Cut(full, ".")
+	if dotted {
+		for _, p := range s.Peers {
+			if strings.EqualFold(p.DNSName, full) {
+				return p, true
+			}
+		}
+	}
+	var first *Peer
+	for i, p := range s.Peers {
+		if !strings.EqualFold(p.Name, short) {
+			continue
+		}
+		if s.Suffix != "" && strings.EqualFold(p.DNSName, p.Name+"."+s.Suffix) {
 			return p, true
 		}
+		if first == nil {
+			first = &s.Peers[i]
+		}
+	}
+	if first != nil {
+		return *first, true
 	}
 	// a host name is chosen by the device itself, so it only counts when no MagicDNS name matched
 	for _, p := range s.Peers {

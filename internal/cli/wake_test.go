@@ -214,3 +214,23 @@ func TestWakeNotOnTailnet(t *testing.T) {
 		t.Errorf("calls %v, waited %v, stderr %q", w.ssh.calls, w.clock.Sub(now), w.errOut)
 	}
 }
+
+// the "cannot be woken" warning must name the real reason, not a generic one
+func TestAutoWakeReason(t *testing.T) {
+	cases := []struct{ hosts, host, want string }{
+		{"relay = \"mini\"\n[[host]]\nname = \"mini\"\nmac = \"aa:bb:cc:dd:ee:09\"\n", "mini", "is the relay"},
+		{"relay = \"mini\"\n[[host]]\nname = \"mini\"\n[[host]]\nname = \"fabric-twin\"\n", "fabric-twin", "no mac"},
+		{"[[host]]\nname = \"fabric-twin\"\nmac = \"aa:bb:cc:dd:ee:01\"\n", "fabric-twin", "no relay"},
+	}
+	for _, c := range cases {
+		w := newWakeHarness(t, 0)
+		if err := os.WriteFile(w.hosts, []byte(c.hosts), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		w.tn.set("mini", false)
+		w.run(c.host, "uptime")
+		if got := w.errOut.String(); !strings.Contains(got, c.want) || strings.Contains(got, "needs mac and relay") {
+			t.Errorf("%s: stderr %q, want the reason %q", c.host, got, c.want)
+		}
+	}
+}

@@ -127,9 +127,18 @@ func (a *App) autoWake(ctx context.Context, inv *inventory.Inventory, h inventor
 	if !ok || p.Online {
 		return nil
 	}
-	if h.MAC == "" || inv.Relay == "" || strings.EqualFold(h.Name, inv.Relay) {
-		fmt.Fprintf(a.Stderr, "%s looks asleep (last seen %s) and cannot be woken (needs mac and relay in the hosts file); trying anyway\n",
-			h.Name, ago(a.Now(), p.LastSeen))
+	reason := ""
+	switch {
+	case strings.EqualFold(h.Name, inv.Relay):
+		reason = "it is the relay itself; nothing else can send its wake packet"
+	case h.MAC == "":
+		reason = "no mac for it in the hosts file"
+	case inv.Relay == "":
+		reason = "no relay in the hosts file"
+	}
+	if reason != "" {
+		fmt.Fprintf(a.Stderr, "%s looks asleep (last seen %s) and cannot be woken (%s); trying anyway\n",
+			h.Name, ago(a.Now(), p.LastSeen), reason)
 		return nil
 	}
 	return a.wake(ctx, inv, h, st, true)

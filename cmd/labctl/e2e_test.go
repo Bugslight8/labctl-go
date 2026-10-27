@@ -51,30 +51,44 @@ func TestEndToEnd(t *testing.T) {
 [ "$1 $2" = "status --json" ] || exit 2
 if [ -f "$FAKE_STATE/woke" ]; then cat "$FAKE_STATE/up.json"; else cat "$FAKE_STATE/asleep.json"; fi
 `, 0o700)
+	// the fake ssh runs a relay command for real (through sh, with the fake labctl below), so its redirections are
+	// tested; anything else just prints fake-ssh
 	write(filepath.Join(fake, "ssh"), `#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_STATE/ssh.log"
-case "$*" in *"labctl wol "*) : > "$FAKE_STATE/woke" ;; esac
-echo "fake-ssh"
+for last; do :; done
+case "$last" in *"labctl wol "*) sh -c "$last" ;; *) echo "fake-ssh" ;; esac
 exit "${FAKE_SSH_EXIT:-0}"
 `, 0o700)
 
 	home := filepath.Join(dir, "home")
+	if err := os.MkdirAll(filepath.Join(home, ".local", "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// first on the relay PATH: prints to stdout like the real labctl wol, and marks the host awake
+	write(filepath.Join(home, ".local", "bin", "labctl"), `#!/bin/sh
+echo "sent Wake-on-LAN for $2 to 255.255.255.255:9"
+: > "$FAKE_STATE/woke"
+`, 0o700)
 	hosts := filepath.Join(home, ".config", "labctl", "hosts.toml")
 	env := append(os.Environ(), "PATH="+fake+":/usr/bin:/bin", "HOME="+home, "FAKE_STATE="+state, "LABCTL_HOSTS=")
-	run := func(extraEnv []string, args ...string) (string, int) {
+	runSplit := func(extraEnv []string, args ...string) (stdout, stderr string, code int) {
 		t.Helper()
 		cmd := exec.Command(bin, args...)
 		cmd.Env = append(append([]string(nil), env...), extraEnv...)
-		var out bytes.Buffer
-		cmd.Stdout, cmd.Stderr = &out, &out
+		var o, e bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &o, &e
 		err := cmd.Run()
-		code := 0
 		if ee, ok := err.(*exec.ExitError); ok {
 			code = ee.ExitCode()
 		} else if err != nil {
 			t.Fatal(err)
 		}
-		return out.String(), code
+		return o.String(), e.String(), code
+	}
+	run := func(extraEnv []string, args ...string) (string, int) {
+		t.Helper()
+		o, e, code := runSplit(extraEnv, args...)
+		return o + e, code
 	}
 	sshLog := func() string { b, _ := os.ReadFile(filepath.Join(state, "ssh.log")); return string(b) }
 
@@ -111,10 +125,14 @@ exit "${FAKE_SSH_EXIT:-0}"
 	// auto-wake: a command for an asleep host wakes it first, then runs
 	os.Remove(filepath.Join(state, "woke"))
 	os.Remove(filepath.Join(state, "ssh.log"))
-	out, code = run(nil, "fabric-twin", "uptime")
+	stdout, stderr, code := runSplit(nil, "fabric-twin", "uptime")
 	lines := strings.Split(strings.TrimSpace(sshLog()), "\n")
 	if code != 0 || len(lines) != 2 || !strings.Contains(lines[0], "labctl wol") || !strings.HasSuffix(lines[1], "-T -- fabric-twin uptime") {
-		t.Fatalf("auto-wake: exit %d\n%s\nssh log:\n%s", code, out, sshLog())
+		t.Fatalf("auto-wake: exit %d\n%s%s\nssh log:\n%s", code, stdout, stderr, sshLog())
+	}
+	// stdout belongs to the command: the wake progress and the relay's own output go to stderr
+	if stdout != "fake-ssh\n" || !strings.Contains(stderr, "sent Wake-on-LAN") || !strings.Contains(stderr, "fabric-twin is up") {
+		t.Fatalf("auto-wake output\nstdout %q\nstderr %q", stdout, stderr)
 	}
 
 	// the remote exit code passes through
