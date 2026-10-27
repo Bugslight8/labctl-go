@@ -1,0 +1,4 @@
+bin/
+.cmos/runs/
+.cmos/evidence/
+.claude/settings.local.json

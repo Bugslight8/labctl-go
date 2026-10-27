@@ -1,0 +1,52 @@
+{
+  "cmos": "5.2.0",
+  "base_branch": "main",
+  "check": "make check",
+  "check_quick": "",
+  "check_timeout_minutes": 20,
+  "require_check": true,
+  "stop_check": true,
+  "notify": true,
+  "review_tiers": [
+    "normal",
+    "sensitive"
+  ],
+  "sensitive": [
+    "(^|/)auth",
+    "(^|/)(login|session|token|oauth|sso|crypto)",
+    "secret|credential|password|\\.pem$|\\.key$",
+    "(^|/)migrations?/",
+    "(^|/)(iam|policy|acl|rbac|firewall)",
+    "Dockerfile|docker-compose|(^|/)(infra|terraform|k8s|helm)/",
+    "^\\.github/",
+    "^\\.claude/|^\\.cmos/(bin/|config\\.json|CLAUDE\\.md)",
+    "(^|/)(mcp|prompts?|agents?)(/|\\.)",
+    "(^|/)(ssh|exec|remote|wake|inventory|hosts?)(/|\\.|_)"
+  ],
+  "small_lines": 40,
+  "review_fix_rounds": 2,
+  "memory_cap": 3000,
+  "map_cap": 6000,
+  "ship": {
+    "coauthor": "Claude <noreply@anthropic.com>"
+  },
+  "night": {
+    "model": "opus",
+    "permission_mode": "auto",
+    "hours": 8,
+    "budget_usd": 60,
+    "plan_budget_usd": 20,
+    "sessions_per_plan": 4,
+    "session_minutes": 180,
+    "parallel": 1,
+    "worktree_links": [
+      ".venv",
+      "venv",
+      "node_modules",
+      ".env"
+    ],
+    "worktree_setup": "",
+    "push": false,
+    "plugin_dirs": []
+  }
+}
