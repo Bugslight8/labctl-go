@@ -1,0 +1,175 @@
+package cli
+
+import (
+	"context"
+	"errors"
+	"net"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/Bugslight8/labctl/internal/tailnet"
+)
+
+// wakeHarness: a fake clock, and a fake relay. When the relay runs `labctl wol <mac>`, the woken host comes online
+// after upAfter more tailnet polls (upAfter < 0: never).
+type wakeHarness struct {
+	*harness
+	ssh     *fakeSSH
+	clock   time.Time
+	upAfter int
+	woke    string // host to bring up
+}
+
+func newWakeHarness(t *testing.T, upAfter int) *wakeHarness {
+	w := &wakeHarness{harness: newHarness(t, hostsFile), clock: now, upAfter: upAfter, woke: "fabric-twin"}
+	w.ssh = withSSH(t, w.harness)
+	w.app.Now = func() time.Time { return w.clock }
+	w.app.Sleep = func(d time.Duration) { w.clock = w.clock.Add(d) }
+	polls, sent := 0, false
+	inner := w.tn.status
+	w.app.Status = func(ctx context.Context) (*tailnet.Status, error) {
+		if sent && w.upAfter >= 0 {
+			if polls >= w.upAfter {
+				w.tn.set(w.woke, true)
+			}
+			polls++
+		}
+		return inner(ctx)
+	}
+	w.app.Exec = func(ctx context.Context, argv []string) (int, error) {
+		if strings.Contains(strings.Join(argv, " "), "labctl wol ") {
+			sent = true
+		}
+		return w.ssh.exec(ctx, argv)
+	}
+	return w
+}
+
+func TestWake(t *testing.T) {
+	w := newWakeHarness(t, 3)
+	if code := w.run("wake", "fabric-twin"); code != 0 {
+		t.Fatalf("exit %d: %s", code, w.errOut)
+	}
+	relay := w.ssh.calls[0]
+	got := strings.Join(relay, " ")
+	if !strings.Contains(got, "-T mini ") || !strings.HasSuffix(got, "labctl wol 'aa:bb:cc:dd:ee:01'") {
+		t.Errorf("relay argv:\n%s", got)
+	}
+	if !strings.Contains(w.out.String(), "fabric-twin is up") {
+		t.Errorf("output:\n%s", w.out)
+	}
+	if waited := w.clock.Sub(now); waited < 6*time.Second || waited > 10*time.Second {
+		t.Errorf("waited %v on the fake clock, want 3 polls of 2 s", waited)
+	}
+}
+
+func TestWakeNoWait(t *testing.T) {
+	w := newWakeHarness(t, -1)
+	if code := w.run("wake", "fabric-twin", "--no-wait"); code != 0 {
+		t.Fatalf("exit %d: %s", code, w.errOut)
+	}
+	if w.clock != now {
+		t.Errorf("--no-wait waited %v", w.clock.Sub(now))
+	}
+}
+
+func TestWakeTimeout(t *testing.T) {
+	w := newWakeHarness(t, -1)
+	if code := w.run("wake", "fabric-twin"); code == 0 {
+		t.Fatal("wake of a host that never comes up succeeded")
+	}
+	if w.clock.Sub(now) < 120*time.Second {
+		t.Errorf("gave up after %v, want 120 s", w.clock.Sub(now))
+	}
+	if !strings.Contains(w.errOut.String(), "Wake-on-LAN") {
+		t.Errorf("timeout message does not explain the WoL settings: %s", w.errOut)
+	}
+}
+
+func TestWakeRefusals(t *testing.T) {
+	cases := map[string][]string{
+		"no mac":       {"wake", "mini"},
+		"unknown host": {"wake", "ghost"},
+		"no host":      {"wake"},
+	}
+	for what, args := range cases {
+		w := newWakeHarness(t, 0)
+		w.tn.set("mini", false) // even when asleep, mini has no mac
+		if code := w.run(args...); code == 0 {
+			t.Errorf("%s: succeeded", what)
+		}
+		if len(w.ssh.calls) != 0 {
+			t.Errorf("%s: ran ssh %v", what, w.ssh.calls)
+		}
+	}
+	w := newWakeHarness(t, 0)
+	w.tn.set("fabric-twin", true)
+	if code := w.run("wake", "fabric-twin"); code != 0 || len(w.ssh.calls) != 0 || !strings.Contains(w.out.String(), "already up") {
+		t.Errorf("waking an up host: exit %d, calls %v, out %q", code, w.ssh.calls, w.out)
+	}
+	w = newWakeHarness(t, 0)
+	w.tn.set("mini", false)
+	if code := w.run("wake", "fabric-twin"); code == 0 || !strings.Contains(w.errOut.String(), "relay") {
+		t.Errorf("relay offline: exit %d, %q", code, w.errOut)
+	}
+}
+
+func TestAutoWake(t *testing.T) {
+	w := newWakeHarness(t, 1)
+	if code := w.run("fabric-twin", "uptime"); code != 0 {
+		t.Fatalf("exit %d: %s", code, w.errOut)
+	}
+	if len(w.ssh.calls) != 2 {
+		t.Fatalf("want the relay wake then the command, got %v", w.ssh.calls)
+	}
+	if !strings.HasSuffix(strings.Join(w.ssh.calls[1], " "), "-T fabric-twin uptime") {
+		t.Errorf("second call: %v", w.ssh.calls[1])
+	}
+
+	// an up host runs at once, with a single status query
+	w = newWakeHarness(t, 0)
+	w.tn.set("fabric-twin", true)
+	w.run("fabric-twin", "uptime")
+	if len(w.ssh.calls) != 1 || w.tn.queries != 1 {
+		t.Errorf("up host: calls %v, status queries %d", w.ssh.calls, w.tn.queries)
+	}
+
+	// a host that cannot be woken is tried anyway, with a warning
+	w = newWakeHarness(t, 0)
+	w.tn.set("mini", false)
+	w.run("mini", "uptime")
+	if len(w.ssh.calls) != 1 || !strings.Contains(w.errOut.String(), "asleep") {
+		t.Errorf("unwakeable host: calls %v, stderr %q", w.ssh.calls, w.errOut)
+	}
+
+	// tailscale unavailable: still try ssh
+	w = newWakeHarness(t, 0)
+	w.app.Status = func(context.Context) (*tailnet.Status, error) { return nil, errors.New("no tailscale") }
+	if code := w.run("mini", "uptime"); code != 0 || len(w.ssh.calls) != 1 {
+		t.Errorf("no tailscale: exit %d, calls %v", code, w.ssh.calls)
+	}
+}
+
+func TestWol(t *testing.T) {
+	h := newHarness(t, "")
+	var sent []string
+	h.app.SendWOL = func(mac net.HardwareAddr, addr string) error {
+		sent = append(sent, mac.String()+" "+addr)
+		return nil
+	}
+	if code := h.run("wol", "AA-BB-CC-DD-EE-01"); code != 0 {
+		t.Fatalf("exit %d: %s", code, h.errOut)
+	}
+	if len(sent) != 1 || sent[0] != "aa:bb:cc:dd:ee:01 255.255.255.255:9" {
+		t.Errorf("sent %v", sent)
+	}
+	for _, bad := range [][]string{{"wol"}, {"wol", "nope"}, {"wol", "00:00:5e:10:00:00:00:01"}} {
+		if code := h.run(bad...); code == 0 {
+			t.Errorf("%v succeeded", bad)
+		}
+	}
+	if len(sent) != 1 {
+		t.Errorf("bad input sent packets: %v", sent)
+	}
+}

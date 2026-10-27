@@ -81,9 +81,9 @@ and `cmos check --quick` prints `CHECK: OK`.
 ### M3: wake through the relay, auto-wake, end-to-end test
 | # | Status | Files | Acceptance check |
 |---|---|---|---|
-| 6 | todo | NEW `internal/wol/wol.go`, NEW `internal/wol/wol_test.go` | `go test ./internal/wol` passes (packet bytes; sent to a local UDP listener) |
-| 7 | todo | `internal/cli/cli.go`, NEW `internal/cli/wake_test.go` | `go test ./internal/cli -run 'TestWake|TestAutoWake|TestWol'` passes |
-| 8 | todo | NEW `cmd/labctl/e2e_test.go`, `Makefile` (`dist`: darwin/arm64, darwin/amd64, linux/amd64, linux/arm64, windows/amd64) | `go test ./cmd/labctl -run TestEndToEnd -v` prints `--- PASS: TestEndToEnd`; `make dist` builds 5 binaries |
+| 6 | done | NEW `internal/wol/wol.go`, NEW `internal/wol/wol_test.go` | `go test ./internal/wol` passes (packet bytes; sent to a local UDP listener) |
+| 7 | done | `internal/cli/cli.go`, NEW `internal/cli/wake_test.go` | `go test ./internal/cli -run 'TestWake|TestAutoWake|TestWol'` passes |
+| 8 | done | NEW `cmd/labctl/e2e_test.go`, `Makefile` (`dist`: darwin/arm64, darwin/amd64, linux/amd64, linux/arm64, windows/amd64) | `go test ./cmd/labctl -run TestEndToEnd -v` prints `--- PASS: TestEndToEnd`; `make dist` builds 5 binaries |
 
 ## Out of scope
 - The hub, the node service, live state streaming (v0.2).

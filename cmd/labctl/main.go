@@ -9,6 +9,7 @@ import (
 	"github.com/Bugslight8/labctl/internal/cli"
 	"github.com/Bugslight8/labctl/internal/inventory"
 	"github.com/Bugslight8/labctl/internal/tailnet"
+	"github.com/Bugslight8/labctl/internal/wol"
 )
 
 const version = "0.1.0-dev"
@@ -23,6 +24,8 @@ func main() {
 		Now:        time.Now,
 		ControlDir: cli.DefaultControlDir(),
 		Exec:       cli.SystemExec,
+		Sleep:      time.Sleep,
+		SendWOL:    wol.Send,
 	}
 	os.Exit(app.Run(context.Background(), os.Args[1:]))
 }

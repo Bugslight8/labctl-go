@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -30,6 +31,8 @@ type App struct {
 	Now            func() time.Time
 	ControlDir     string                                                // where the shared SSH connection sockets live
 	Exec           func(ctx context.Context, argv []string) (int, error) // runs ssh with this terminal; returns its exit code
+	Sleep          func(time.Duration)                                   // waits between tailnet polls while a host wakes
+	SendWOL        func(mac net.HardwareAddr, addr string) error         // sends a magic packet from this machine
 }
 
 const usage = `labctl - command center for the home lab
@@ -83,6 +86,10 @@ func (a *App) run(ctx context.Context, args []string) error {
 		return nil
 	case "off":
 		return a.off(ctx, args[1:])
+	case "wake":
+		return a.wakeCmd(ctx, args[1:])
+	case "wol":
+		return a.wolCmd(args[1:])
 	}
 	return a.onHost(ctx, args[0], args[1:])
 }
@@ -96,6 +103,9 @@ func (a *App) onHost(ctx context.Context, name string, cmd []string) error {
 	h, ok := inv.Find(name)
 	if !ok {
 		return fmt.Errorf("unknown command or host %q (labctl help; hosts are in %s)", name, a.HostsPath)
+	}
+	if err := a.autoWake(ctx, inv, h); err != nil {
+		return err
 	}
 	if err := sshx.EnsureControlDir(a.ControlDir); err != nil {
 		return err
