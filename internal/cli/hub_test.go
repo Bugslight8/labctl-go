@@ -273,7 +273,7 @@ func TestWatch(t *testing.T) {
 func TestWatchRetries(t *testing.T) {
 	h := newHarness(t, clientHosts)
 	f, _ := withHub(t, h)
-	f.err = errors.New("hub down: GET /v1/hosts fails") // watch must not need the host list
+	f.err = errors.New("hub down: GET /v1/hosts fails")                               // watch must not need the host list
 	f.eventsHook = func(call int) bool { return call <= 1 || call == 3 || call == 4 } // outages: calls 0-1, 3-4
 	f.events = []hub.EventsResponse{
 		{Events: []hub.Event{ev(1, "mini", "", "up")}, Last: 1, Boot: "b1"},
