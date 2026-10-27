@@ -133,3 +133,33 @@ func TestRelayByTailnetName(t *testing.T) {
 		t.Errorf("relay = %q (%v), want the host name mini", inv.Relay, err)
 	}
 }
+
+func TestHubTable(t *testing.T) {
+	inv, err := Parse([]byte("[hub]\nallow = [\"me@example.com\"]\n[[host]]\nname = \"a\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inv.Hub == nil || len(inv.Hub.Allow) != 1 || inv.Hub.Allow[0] != "me@example.com" || inv.Hub.Port != DefaultHubPort {
+		t.Fatalf("hub = %+v", inv.Hub)
+	}
+	if inv, _ := Parse([]byte("[[host]]\nname = \"a\"\n")); inv.Hub != nil {
+		t.Error("no [hub] table must mean Hub == nil")
+	}
+	inv, err = Parse([]byte("[hub]\nallow = [\"me@github\", \"Spouse@Example.com\"]\nport = 8000\n"))
+	if err != nil || inv.Hub.Port != 8000 || inv.Hub.Allow[1] != "spouse@example.com" {
+		t.Errorf("port/allow: %+v %v (logins compare lowercased)", inv.Hub, err)
+	}
+	for what, src := range map[string]string{
+		"empty allow": "[hub]\nallow = []\n",
+		"no allow":    "[hub]\nport = 7300\n",
+		"bad login":   "[hub]\nallow = [\"not a login\"]\n",
+		"star":        "[hub]\nallow = [\"*\"]\n",
+		"port 0":      "[hub]\nallow = [\"me@x.com\"]\nport = 0\n",
+		"port big":    "[hub]\nallow = [\"me@x.com\"]\nport = 70000\n",
+		"unknown key": "[hub]\nallow = [\"me@x.com\"]\nopen = true\n",
+	} {
+		if _, err := Parse([]byte(src)); err == nil {
+			t.Errorf("%s: accepted", what)
+		}
+	}
+}

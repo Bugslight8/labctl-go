@@ -73,8 +73,8 @@ host; a stranger gets 403), and `cmos check --quick` prints `CHECK: OK`.
 ### M2: inventory [hub] table, poller and events
 | # | Status | Files | Acceptance check |
 |---|---|---|---|
-| 3 | todo | `internal/inventory/inventory.go`, `internal/inventory/inventory_test.go` | `go test ./internal/inventory -run 'TestHubTable'` passes |
-| 4 | todo | NEW `internal/hub/state.go`, NEW `internal/hub/state_test.go` | `go test ./internal/hub -run 'TestPoll|TestEvents'` passes |
+| 3 | done | `internal/inventory/inventory.go`, `internal/inventory/inventory_test.go` | `go test ./internal/inventory -run 'TestHubTable'` passes |
+| 4 | done | NEW `internal/hub/state.go`, NEW `internal/hub/state_test.go` | `go test ./internal/hub -run 'TestPoll|TestEvents'` passes |
 
 ### M3: API, access control, audit
 | # | Status | Files | Acceptance check |

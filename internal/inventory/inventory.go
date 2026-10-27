@@ -16,6 +16,9 @@ import (
 // DefaultTmux is the tmux session a shell attaches to when the hosts file does not name one.
 const DefaultTmux = "main"
 
+// DefaultHubPort is where the hub listens on its Tailscale addresses.
+const DefaultHubPort = 7300
+
 // Host is one machine. Every string field here reaches an ssh argv or a remote command, so Parse validates it.
 type Host struct {
 	Name    string // what the user types: labctl <name>
@@ -30,12 +33,28 @@ type Host struct {
 type Inventory struct {
 	Relay string // name of the host that sends wake packets; empty = no waking
 	Hosts []Host
+	Hub   *Hub // the [hub] table: only the hub's own hosts file has one
+}
+
+// Hub configures `labctl hub`.
+type Hub struct {
+	Allow []string // Tailscale logins (lowercased) that may use the hub; never empty
+	Port  int
 }
 
 type file struct {
 	Relay string    `toml:"relay"`
 	Host  []rawHost `toml:"host"`
+	Hub   *rawHub   `toml:"hub"`
 }
+
+type rawHub struct {
+	Allow []string `toml:"allow"`
+	Port  *int     `toml:"port"`
+}
+
+// login is a Tailscale login name: user@domain, or user@github style for GitHub sign-ins. No wildcards.
+var login = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$`)
 
 type rawHost struct {
 	Name    string  `toml:"name"`
@@ -83,6 +102,13 @@ func Parse(data []byte) (*Inventory, error) {
 		return nil, fmt.Errorf("unknown key %q", extra[0].String())
 	}
 	inv := &Inventory{Relay: f.Relay}
+	if f.Hub != nil {
+		hub, err := parseHub(f.Hub)
+		if err != nil {
+			return nil, err
+		}
+		inv.Hub = hub
+	}
 	seen := map[string]bool{}
 	for i, r := range f.Host {
 		h := Host{Name: r.Name, Tailnet: r.Tailnet, User: r.User, OS: strings.ToLower(r.OS), Tmux: DefaultTmux}
@@ -126,6 +152,26 @@ func Parse(data []byte) (*Inventory, error) {
 		inv.Relay = r.Name // callers compare host names
 	}
 	return inv, nil
+}
+
+func parseHub(r *rawHub) (*Hub, error) {
+	if len(r.Allow) == 0 {
+		return nil, fmt.Errorf("[hub] allow is empty: list the Tailscale logins that may use the hub")
+	}
+	h := &Hub{Port: DefaultHubPort}
+	for _, l := range r.Allow {
+		if !login.MatchString(l) {
+			return nil, fmt.Errorf("[hub] allow: %q is not a Tailscale login (user@domain)", l)
+		}
+		h.Allow = append(h.Allow, strings.ToLower(l))
+	}
+	if r.Port != nil {
+		if *r.Port < 1 || *r.Port > 65535 {
+			return nil, fmt.Errorf("[hub] port %d is not 1-65535", *r.Port)
+		}
+		h.Port = *r.Port
+	}
+	return h, nil
 }
 
 // Find returns the host whose name or tailnet name is q, ignoring case.
