@@ -34,6 +34,7 @@ type App struct {
 	Exec           func(ctx context.Context, argv []string) (int, error) // runs ssh with this terminal; returns its exit code
 	Sleep          func(time.Duration)                                   // waits between tailnet polls while a host wakes
 	SendWOL        func(mac net.HardwareAddr, addr string) error         // sends a magic packet from this machine
+	Hub            func(ctx context.Context, args []string) error        // labctl hub ...; runs on the relay
 }
 
 const usage = `labctl - command center for the home lab
@@ -47,6 +48,10 @@ const usage = `labctl - command center for the home lab
   labctl <host> <cmd...>      run a command there; one quoted argument runs as a shell string
   labctl off [host]           close the shared SSH connections
   labctl version
+
+  on the always-on relay (the Mac mini), with a [hub] table in its hosts file:
+  labctl hub                  run the hub: watch every host, serve state and wake requests to allowed logins
+  labctl hub install          run it as a launchd login service (restarts if it stops); hub uninstall removes it
 `
 
 // Run executes one command line and returns the process exit code.
@@ -91,6 +96,11 @@ func (a *App) run(ctx context.Context, args []string) error {
 		return a.wakeCmd(ctx, args[1:])
 	case "wol":
 		return a.wolCmd(args[1:])
+	case "hub":
+		if a.Hub == nil {
+			return errors.New("the hub is not available in this build")
+		}
+		return a.Hub(ctx, args[1:])
 	}
 	return a.onHost(ctx, args[0], args[1:])
 }

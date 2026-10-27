@@ -85,8 +85,8 @@ host; a stranger gets 403), and `cmos check --quick` prints `CHECK: OK`.
 ### M4: `labctl hub`, launchd install, end-to-end
 | # | Status | Files | Acceptance check |
 |---|---|---|---|
-| 7 | todo | NEW `internal/hub/serve.go`, NEW `internal/hub/launchd.go`, NEW `internal/hub/launchd_test.go`, `internal/cli/cli.go`, `cmd/labctl/main.go` | `go test ./internal/hub -run 'TestLaunchd' ./internal/cli -run 'TestHubCmd'` passes |
-| 8 | todo | NEW `internal/hub/e2e_test.go`, `README.md` | `go test ./internal/hub/... -run TestHubEndToEnd -v` prints `--- PASS: TestHubEndToEnd` |
+| 7 | done | NEW `internal/hub/serve.go`, NEW `internal/hub/launchd.go`, NEW `internal/hub/launchd_test.go`, `internal/cli/cli.go`, `cmd/labctl/main.go` | `go test ./internal/hub -run 'TestLaunchd' ./internal/cli -run 'TestHubCmd'` passes |
+| 8 | done | NEW `internal/hub/e2e_test.go`, `README.md` | `go test ./internal/hub/... -run TestHubEndToEnd -v` prints `--- PASS: TestHubEndToEnd` |
 
 ## Out of scope
 - Clients using the hub: `labctl ls/wake/watch` over the hub, inventory cache, direct-mode fallback (v02b-hub-client).

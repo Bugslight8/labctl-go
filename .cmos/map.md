@@ -16,6 +16,7 @@ labctl: command center for the home lab: reach, wake and control every host and 
 - internal/tailnet: `tailscale status --json` parse (peer name = first MagicDNS label), Query.
 - internal/sshx: ssh argv with ControlMaster options, POSIX Quote, EnsureControlDir (0700, owner).
 - internal/wol: magic packet + UDP broadcast send.
+- internal/hub (v0.2a): state.go (Monitor: tailscale status + port-22 probe -> up/unreachable/asleep/not-on-tailnet, event ring, Wait long poll), auth.go (Authorizer: RemoteAddr -> tailscale whois -> [hub] allow; ListenAddrs tailnet-only), api.go (Server: guard -> auth -> /v1/hosts, /v1/events, POST /v1/wake/{name}), audit.go (audit.jsonl 0600), launchd.go (LaunchAgent plist, bootstrap/bootout), serve.go (Serve, Main). e2e_test.go: real Serve over loopback with remote-address-spoofing listeners.
 
 ## Predecessor
 - Bash version: ../fabric/tools/mac/{labctl,common.sh,labcap,labwalk,labui} (one host, fabric-twin, over Tailscale SSH).

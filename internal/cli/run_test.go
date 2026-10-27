@@ -117,3 +117,25 @@ func TestOff(t *testing.T) {
 		t.Errorf("off <host>: %v", ssh.calls)
 	}
 }
+
+func TestHubCmd(t *testing.T) {
+	h := newHarness(t, hostsFile)
+	var got []string
+	h.app.Hub = func(_ context.Context, args []string) error { got = append([]string{"called"}, args...); return nil }
+	if code := h.run("hub", "install"); code != 0 || strings.Join(got, " ") != "called install" {
+		t.Errorf("hub install: exit %d, got %v", code, got)
+	}
+	got = nil
+	if code := h.run("hub"); code != 0 || strings.Join(got, " ") != "called" {
+		t.Errorf("bare hub: exit %d, got %v", code, got)
+	}
+	h.app.Hub = func(context.Context, []string) error { return errors.New("no [hub] table") }
+	if code := h.run("hub"); code != 1 || !strings.Contains(h.errOut.String(), "no [hub] table") {
+		t.Errorf("hub error: exit %d, %q", code, h.errOut)
+	}
+	h.out.Reset()
+	h.run("help")
+	if !strings.Contains(h.out.String(), "labctl hub install") {
+		t.Errorf("help lacks the hub:\n%s", h.out)
+	}
+}

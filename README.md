@@ -21,3 +21,18 @@ labctl off                  close the shared SSH connections
 5. Each host to wake: Wake-on-LAN on in the firmware and the network adapter, on Ethernet.
 
 Every command reuses one SSH connection per host for 10 minutes, so only the first pays the handshake.
+
+## The hub (v0.2, on the always-on Mac mini)
+`labctl hub` watches every host (up / unreachable / asleep / not-on-tailnet, with history), serves that state and
+wake requests to your own devices over the tailnet, and logs every wake to `~/.local/state/labctl/audit.jsonl`.
+
+1. On the mini, give its hosts file a `[hub]` table:
+   ```toml
+   [hub]
+   allow = ["you@example.com"]   # your Tailscale login (tailscale whois shows it); nobody else gets in
+   ```
+2. `labctl hub install` runs it as a launchd login service that restarts if it stops (log:
+   `~/.local/state/labctl/hub.log`). Set the mini to log in automatically. `labctl hub uninstall` removes it.
+
+It listens only on the mini's Tailscale addresses (port 7300), identifies every caller with `tailscale whois`, refuses
+tagged devices and browser-style requests, and sends Wake-on-LAN itself, at most once per host every 10 s.
