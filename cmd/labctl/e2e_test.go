@@ -101,7 +101,7 @@ exit "${FAKE_SSH_EXIT:-0}"
 	if code != 0 || !strings.Contains(out, "fabric-twin is up") {
 		t.Fatalf("wake: exit %d\n%s", code, out)
 	}
-	if !strings.Contains(sshLog(), "-T mini PATH=") || !strings.Contains(sshLog(), "labctl wol 'aa:bb:cc:dd:ee:01'") {
+	if !strings.Contains(sshLog(), "-- mini PATH=") || !strings.Contains(sshLog(), "labctl wol 'aa:bb:cc:dd:ee:01'") {
 		t.Fatalf("relay call:\n%s", sshLog())
 	}
 	if fi, err := os.Stat(filepath.Join(home, ".cache", "labctl")); err != nil || fi.Mode().Perm() != 0o700 {
@@ -113,7 +113,7 @@ exit "${FAKE_SSH_EXIT:-0}"
 	os.Remove(filepath.Join(state, "ssh.log"))
 	out, code = run(nil, "fabric-twin", "uptime")
 	lines := strings.Split(strings.TrimSpace(sshLog()), "\n")
-	if code != 0 || len(lines) != 2 || !strings.Contains(lines[0], "labctl wol") || !strings.HasSuffix(lines[1], "-T fabric-twin uptime") {
+	if code != 0 || len(lines) != 2 || !strings.Contains(lines[0], "labctl wol") || !strings.HasSuffix(lines[1], "-T -- fabric-twin uptime") {
 		t.Fatalf("auto-wake: exit %d\n%s\nssh log:\n%s", code, out, sshLog())
 	}
 

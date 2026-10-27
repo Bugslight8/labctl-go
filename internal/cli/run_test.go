@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -39,7 +40,7 @@ func TestRun(t *testing.T) {
 		t.Fatalf("exit %d: %s", code, h.errOut)
 	}
 	got := ssh.last()
-	for _, want := range []string{"ControlMaster=auto", "ControlPersist=10m", "ServerAliveInterval=5", "-T mini 'git' 'commit' '-m' 'fix bgp'"} {
+	for _, want := range []string{"ControlMaster=auto", "ControlPersist=10m", "ServerAliveInterval=5", "-T -- mini 'git' 'commit' '-m' 'fix bgp'"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("argv lacks %q:\n%s", want, got)
 		}
@@ -48,7 +49,7 @@ func TestRun(t *testing.T) {
 		t.Errorf("argv does not use the control dir:\n%s", got)
 	}
 	h.run("mini", "make a && make b")
-	if !strings.HasSuffix(ssh.last(), "-T mini make a && make b") {
+	if !strings.HasSuffix(ssh.last(), "-T -- mini make a && make b") {
 		t.Errorf("one argument must pass as a shell string:\n%s", ssh.last())
 	}
 }
@@ -60,10 +61,10 @@ func TestShell(t *testing.T) {
 	if code := h.run("fabric-twin"); code != 0 {
 		t.Fatalf("exit %d: %s", code, h.errOut)
 	}
-	if !strings.Contains(ssh.last(), "-t fabric-twin tmux attach -t 'lab'") {
+	if !strings.Contains(ssh.last(), "-t -- fabric-twin tmux attach -t 'lab'") {
 		t.Errorf("shell argv:\n%s", ssh.last())
 	}
-	if code := h.run("MINI"); code != 0 || !strings.Contains(ssh.last(), "-t mini tmux attach -t 'main'") {
+	if code := h.run("MINI"); code != 0 || !strings.Contains(ssh.last(), "-t -- mini tmux attach -t 'main'") {
 		t.Errorf("host names are case-insensitive and tmux defaults to main: exit %d\n%s", code, ssh.last())
 	}
 }
@@ -86,6 +87,15 @@ func TestExitCode(t *testing.T) {
 	}
 }
 
+func TestOffReportsExecErrors(t *testing.T) {
+	h := newHarness(t, hostsFile)
+	h.app.ControlDir = t.TempDir()
+	h.app.Exec = func(context.Context, []string) (int, error) { return 0, errors.New("ssh: not found") }
+	if code := h.run("off"); code == 0 || !strings.Contains(h.errOut.String(), "ssh: not found") {
+		t.Errorf("exit %d, stderr %q", code, h.errOut)
+	}
+}
+
 func TestOff(t *testing.T) {
 	h := newHarness(t, hostsFile)
 	ssh := withSSH(t, h)
@@ -103,7 +113,7 @@ func TestOff(t *testing.T) {
 	}
 	ssh.calls = nil
 	h.run("off", "fabric-twin")
-	if len(ssh.calls) != 1 || !strings.HasSuffix(ssh.last(), "-O exit fabric-twin") {
+	if len(ssh.calls) != 1 || !strings.HasSuffix(ssh.last(), "-O exit -- fabric-twin") {
 		t.Errorf("off <host>: %v", ssh.calls)
 	}
 }

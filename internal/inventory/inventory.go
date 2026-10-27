@@ -119,9 +119,11 @@ func Parse(data []byte) (*Inventory, error) {
 		inv.Hosts = append(inv.Hosts, h)
 	}
 	if inv.Relay != "" {
-		if _, ok := inv.Find(inv.Relay); !ok {
+		r, ok := inv.Find(inv.Relay)
+		if !ok {
 			return nil, fmt.Errorf("relay %q is not a host in this file", inv.Relay)
 		}
+		inv.Relay = r.Name // callers compare host names
 	}
 	return inv, nil
 }

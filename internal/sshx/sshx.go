@@ -31,7 +31,8 @@ func Target(h inventory.Host) string {
 }
 
 // Argv is the ssh command that runs remote on h; tty allocates a terminal (interactive shells, tmux).
-// remote = "" opens a login shell.
+// remote = "" opens a login shell. The "--" ends ssh's options: OpenSSH keeps parsing options after the host, so
+// without it a one-argument command such as -oProxyCommand=... would run on this machine.
 func Argv(h inventory.Host, controlDir, remote string, tty bool) []string {
 	argv := append([]string{"ssh"}, Options(controlDir)...)
 	if tty {
@@ -39,7 +40,7 @@ func Argv(h inventory.Host, controlDir, remote string, tty bool) []string {
 	} else {
 		argv = append(argv, "-T")
 	}
-	argv = append(argv, Target(h))
+	argv = append(argv, "--", Target(h))
 	if remote != "" {
 		argv = append(argv, remote)
 	}
@@ -48,7 +49,7 @@ func Argv(h inventory.Host, controlDir, remote string, tty bool) []string {
 
 // OffArgv closes h's shared connection.
 func OffArgv(h inventory.Host, controlDir string) []string {
-	return append(append([]string{"ssh"}, Options(controlDir)...), "-O", "exit", Target(h))
+	return append(append([]string{"ssh"}, Options(controlDir)...), "-O", "exit", "--", Target(h))
 }
 
 // ShellCommand attaches h's tmux session or creates it, falling back to a login shell when tmux is missing.
@@ -95,8 +96,5 @@ func EnsureControlDir(dir string) error {
 	if !fi.IsDir() {
 		return fmt.Errorf("%s is not a directory", dir)
 	}
-	if fi.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("%s has mode %v: other users can reach the SSH sockets; run chmod 700 %s", dir, fi.Mode().Perm(), dir)
-	}
-	return checkOwner(fi, dir)
+	return checkPrivate(fi, dir)
 }

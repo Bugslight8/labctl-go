@@ -64,3 +64,10 @@ func TestParseRejectsStoppedBackend(t *testing.T) {
 		t.Errorf("err = %v, want one naming the Stopped state", err)
 	}
 }
+
+func TestLookupPrefersMagicDNSName(t *testing.T) {
+	s := &Status{Peers: []Peer{{Name: "alpha", HostName: "mini"}, {Name: "mini", HostName: "Mac-mini", Online: true}}}
+	if p, _ := s.Lookup("mini"); p.Name != "mini" {
+		t.Errorf("Lookup(mini) = %q: a peer naming itself mini must not shadow mini's MagicDNS name", p.Name)
+	}
+}

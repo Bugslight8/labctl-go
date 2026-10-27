@@ -4,6 +4,7 @@ package tailnet
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -79,7 +80,13 @@ func Parse(r io.Reader) (*Status, error) {
 func (s *Status) Lookup(q string) (Peer, bool) {
 	short, _, _ := strings.Cut(strings.TrimSuffix(q, "."), ".")
 	for _, p := range s.Peers {
-		if strings.EqualFold(p.Name, short) || strings.EqualFold(p.HostName, q) {
+		if strings.EqualFold(p.Name, short) {
+			return p, true
+		}
+	}
+	// a host name is chosen by the device itself, so it only counts when no MagicDNS name matched
+	for _, p := range s.Peers {
+		if strings.EqualFold(p.HostName, q) {
 			return p, true
 		}
 	}
@@ -100,6 +107,10 @@ func Query(ctx context.Context) (*Status, error) {
 	}
 	out, err := exec.CommandContext(ctx, bin, "status", "--json").Output()
 	if err != nil && len(out) == 0 {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+			return nil, fmt.Errorf("tailscale status: %s", strings.TrimSpace(string(ee.Stderr)))
+		}
 		return nil, fmt.Errorf("tailscale status: %w", err)
 	}
 	return Parse(strings.NewReader(string(out)))

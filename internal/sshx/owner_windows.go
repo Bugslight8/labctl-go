@@ -2,5 +2,6 @@ package sshx
 
 import "os"
 
-// Windows OpenSSH has no ControlMaster; the directory only has to exist.
-func checkOwner(os.FileInfo, string) error { return nil }
+// Windows reports every directory as mode 0777 and OpenSSH there has no ControlMaster sockets: the directory only
+// has to exist.
+func checkPrivate(os.FileInfo, string) error { return nil }

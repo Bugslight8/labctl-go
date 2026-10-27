@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	wakePoll    = 2 * time.Second
-	wakeTimeout = 120 * time.Second
+	wakePoll       = 2 * time.Second
+	wakeTimeout    = 120 * time.Second
+	wakePollErrors = 3 // consecutive tailscale failures before giving up: the problem is here, not on the host
 )
 
 // relayPath finds labctl on the relay in a non-interactive ssh session, where ~/.local/bin is often not on PATH.
@@ -55,6 +56,7 @@ func (a *App) wakeCmd(ctx context.Context, args []string) error {
 }
 
 // wake asks the relay to send h's magic packet, then (when wait) polls the tailnet until h is online.
+// Progress goes to Stderr: before an auto-woken command, Stdout belongs to that command's output.
 func (a *App) wake(ctx context.Context, inv *inventory.Inventory, h inventory.Host, st *tailnet.Status, wait bool) error {
 	if h.MAC == "" {
 		return fmt.Errorf("%s has no mac in %s, so it cannot be woken", h.Name, a.HostsPath)
@@ -62,7 +64,8 @@ func (a *App) wake(ctx context.Context, inv *inventory.Inventory, h inventory.Ho
 	if inv.Relay == "" {
 		return fmt.Errorf("no relay in %s: set relay = \"<always-on host>\"", a.HostsPath)
 	}
-	if p, ok := st.Lookup(h.Tailnet); ok && p.Online {
+	p, onTailnet := st.Lookup(h.Tailnet)
+	if onTailnet && p.Online {
 		fmt.Fprintf(a.Stdout, "%s is already up\n", h.Name)
 		return nil
 	}
@@ -73,8 +76,11 @@ func (a *App) wake(ctx context.Context, inv *inventory.Inventory, h inventory.Ho
 	if err := sshx.EnsureControlDir(a.ControlDir); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.Stdout, "waking %s via %s ...\n", h.Name, relay.Name)
-	argv := sshx.Argv(relay, a.ControlDir, relayPath+"labctl wol "+sshx.Quote([]string{h.MAC}), false)
+	fmt.Fprintf(a.Stderr, "waking %s via %s ...\n", h.Name, relay.Name)
+	// -n: the relay must not read the user's stdin (it may be piped into the command that follows);
+	// >&2: the relay's own output must not land in the user's stdout
+	argv := sshx.Argv(relay, a.ControlDir, relayPath+"labctl wol "+sshx.Quote([]string{h.MAC})+" >&2", false)
+	argv = append([]string{argv[0], "-n"}, argv[1:]...)
 	code, err := a.Exec(ctx, argv)
 	if err != nil {
 		return err
@@ -85,15 +91,23 @@ func (a *App) wake(ctx context.Context, inv *inventory.Inventory, h inventory.Ho
 	if !wait {
 		return nil
 	}
-	start := a.Now()
+	if !onTailnet {
+		fmt.Fprintf(a.Stderr, "sent; %s is not on the tailnet, so labctl cannot tell when it is up\n", h.Name)
+		return nil
+	}
+	start, failures := a.Now(), 0
 	for a.Now().Sub(start) < wakeTimeout {
 		a.Sleep(wakePoll)
 		st, err := a.Status(ctx)
 		if err != nil {
+			if failures++; failures >= wakePollErrors {
+				return fmt.Errorf("checking whether %s woke: %w", h.Name, err)
+			}
 			continue
 		}
+		failures = 0
 		if p, ok := st.Lookup(h.Tailnet); ok && p.Online {
-			fmt.Fprintf(a.Stdout, "%s is up (%ds)\n", h.Name, int(a.Now().Sub(start).Seconds()))
+			fmt.Fprintf(a.Stderr, "%s is up (%ds)\n", h.Name, int(a.Now().Sub(start).Seconds()))
 			return nil
 		}
 	}

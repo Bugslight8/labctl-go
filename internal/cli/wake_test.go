@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -53,14 +54,15 @@ func TestWake(t *testing.T) {
 	}
 	relay := w.ssh.calls[0]
 	got := strings.Join(relay, " ")
-	if !strings.Contains(got, "-T mini ") || !strings.HasSuffix(got, "labctl wol 'aa:bb:cc:dd:ee:01'") {
+	if !strings.Contains(got, "ssh -n ") || !strings.Contains(got, "-T -- mini ") || !strings.HasSuffix(got, "labctl wol 'aa:bb:cc:dd:ee:01' >&2") {
 		t.Errorf("relay argv:\n%s", got)
 	}
-	if !strings.Contains(w.out.String(), "fabric-twin is up") {
-		t.Errorf("output:\n%s", w.out)
+	if !strings.Contains(w.errOut.String(), "fabric-twin is up") || w.out.Len() != 0 {
+		t.Errorf("progress must go to stderr only; stdout %q, stderr %q", w.out, w.errOut)
 	}
-	if waited := w.clock.Sub(now); waited < 6*time.Second || waited > 10*time.Second {
-		t.Errorf("waited %v on the fake clock, want 3 polls of 2 s", waited)
+	// upAfter 3: polls 1-3 still asleep, poll 4 sees it up, each poll after a 2 s sleep
+	if waited := w.clock.Sub(now); waited != 8*time.Second {
+		t.Errorf("waited %v on the fake clock, want 4 polls of 2 s", waited)
 	}
 }
 
@@ -123,8 +125,11 @@ func TestAutoWake(t *testing.T) {
 	if len(w.ssh.calls) != 2 {
 		t.Fatalf("want the relay wake then the command, got %v", w.ssh.calls)
 	}
-	if !strings.HasSuffix(strings.Join(w.ssh.calls[1], " "), "-T fabric-twin uptime") {
+	if !strings.HasSuffix(strings.Join(w.ssh.calls[1], " "), "-T -- fabric-twin uptime") {
 		t.Errorf("second call: %v", w.ssh.calls[1])
+	}
+	if w.out.Len() != 0 {
+		t.Errorf("auto-wake wrote to stdout, which belongs to the command: %q", w.out)
 	}
 
 	// an up host runs at once, with a single status query
@@ -171,5 +176,41 @@ func TestWol(t *testing.T) {
 	}
 	if len(sent) != 1 {
 		t.Errorf("bad input sent packets: %v", sent)
+	}
+}
+
+// a tailscale that keeps failing while a host wakes must surface its error, not the Wake-on-LAN checklist
+func TestWakePollError(t *testing.T) {
+	w := newWakeHarness(t, -1)
+	inner := w.app.Status
+	w.app.Status = func(ctx context.Context) (*tailnet.Status, error) {
+		if len(w.ssh.calls) > 0 {
+			return nil, errors.New("failed to connect to local tailscaled")
+		}
+		return inner(ctx)
+	}
+	if code := w.run("wake", "fabric-twin"); code == 0 {
+		t.Fatal("succeeded")
+	}
+	if !strings.Contains(w.errOut.String(), "tailscaled") || strings.Contains(w.errOut.String(), "Wake-on-LAN") {
+		t.Errorf("stderr %q", w.errOut)
+	}
+	if w.clock.Sub(now) >= wakeTimeout {
+		t.Errorf("waited the full timeout (%v) despite tailscale failing", w.clock.Sub(now))
+	}
+}
+
+// a host that is not on the tailnet can be woken, but labctl cannot see it come up: send and return
+func TestWakeNotOnTailnet(t *testing.T) {
+	w := newWakeHarness(t, -1)
+	hosts := strings.Replace(hostsFile, "name = \"nas\"\n", "name = \"nas\"\nmac = \"aa:bb:cc:dd:ee:02\"\n", 1)
+	if err := os.WriteFile(w.hosts, []byte(hosts), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := w.run("wake", "nas"); code != 0 {
+		t.Fatalf("exit %d: %s", code, w.errOut)
+	}
+	if len(w.ssh.calls) != 1 || w.clock != now || !strings.Contains(w.errOut.String(), "not on the tailnet") {
+		t.Errorf("calls %v, waited %v, stderr %q", w.ssh.calls, w.clock.Sub(now), w.errOut)
 	}
 }

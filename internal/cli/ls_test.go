@@ -130,7 +130,8 @@ func TestLsWithoutHostsFile(t *testing.T) {
 
 func TestHostsInit(t *testing.T) {
 	h := newHarness(t, "")
-	h.tn.peers = append(h.tn.peers, tailnet.Peer{Name: "-oProxyCommand=x", OS: "linux"})
+	h.tn.peers = append(h.tn.peers, tailnet.Peer{Name: "-oProxyCommand=x", OS: "linux"},
+		tailnet.Peer{Name: "mini", HostName: "shared-from-another-tailnet", OS: "linux"})
 	if code := h.run("hosts", "init"); code != 0 {
 		t.Fatalf("exit %d: %s", code, h.errOut)
 	}
@@ -180,5 +181,18 @@ func TestUsageAndVersion(t *testing.T) {
 	h.out.Reset()
 	if code := h.run("help"); code != 0 || !strings.Contains(h.out.String(), "labctl wake") {
 		t.Errorf("help: exit %d\n%s", code, h.out)
+	}
+}
+
+// Security L2: peer-reported names and OS reach the terminal; escape sequences must not.
+func TestLsStripsControlChars(t *testing.T) {
+	h := newHarness(t, hostsFile)
+	h.tn.peers[1].OS = "macos\x1b[2J\x1b]0;pwned\x07"
+	h.tn.peers = append(h.tn.peers, tailnet.Peer{Name: "evil\x1b[31m", Online: true})
+	if code := h.run("ls"); code != 0 {
+		t.Fatalf("exit %d: %s", code, h.errOut)
+	}
+	if strings.ContainsAny(h.out.String(), "\x1b\x07") {
+		t.Errorf("control characters reached the terminal: %q", h.out)
 	}
 }

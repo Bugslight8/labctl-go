@@ -126,3 +126,10 @@ func TestLoadAndPath(t *testing.T) {
 		t.Errorf("default Path() = %q, want %q", Path(), want)
 	}
 }
+
+func TestRelayByTailnetName(t *testing.T) {
+	inv, err := Parse([]byte("relay = \"m1\"\n[[host]]\nname = \"mini\"\ntailnet = \"m1\"\n"))
+	if err != nil || inv.Relay != "mini" {
+		t.Errorf("relay = %q (%v), want the host name mini", inv.Relay, err)
+	}
+}

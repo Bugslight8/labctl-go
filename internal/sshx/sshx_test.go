@@ -73,16 +73,16 @@ func TestArgv(t *testing.T) {
 	got := Argv(h, "/c", "make deploy", false)
 	want := []string{"ssh", "-o", "ConnectTimeout=10", "-o", "ControlMaster=auto", "-o", "ControlPath=/c/cm-%C",
 		"-o", "ControlPersist=10m", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
-		"-T", "krish@korg", "make deploy"}
+		"-T", "--", "krish@korg", "make deploy"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Argv\n got %q\nwant %q", got, want)
 	}
 	h.User = ""
 	tty := Argv(h, "/c", ShellCommand(h), true)
-	if tty[len(tty)-3] != "-t" || tty[len(tty)-2] != "korg" {
+	if tty[len(tty)-4] != "-t" || tty[len(tty)-3] != "--" || tty[len(tty)-2] != "korg" {
 		t.Errorf("interactive argv %q", tty)
 	}
-	if exit := OffArgv(h, "/c"); strings.Join(exit[len(exit)-3:], " ") != "-O exit korg" {
+	if exit := OffArgv(h, "/c"); strings.Join(exit[len(exit)-4:], " ") != "-O exit -- korg" {
 		t.Errorf("OffArgv %q", exit)
 	}
 }
@@ -94,5 +94,26 @@ func TestShellCommand(t *testing.T) {
 	}
 	if got := ShellCommand(inventory.Host{Tmux: ""}); got != "" {
 		t.Errorf("no tmux must mean a plain login shell (empty remote command), got %q", got)
+	}
+}
+
+// Security M1: a one-argument command is passed unquoted, so it must never be read as an ssh option.
+func TestOptionInjection(t *testing.T) {
+	h := inventory.Host{Name: "a", Tailnet: "a"}
+	for _, argv := range [][]string{
+		Argv(h, "/c", RemoteCommand([]string{"-oProxyCommand=touch /tmp/pwned"}), false),
+		Argv(h, "/c", "-oProxyCommand=x", true),
+		OffArgv(h, "/c"),
+	} {
+		end := -1
+		for i, a := range argv {
+			if a == "--" {
+				end = i
+				break
+			}
+		}
+		if end < 0 || argv[end+1] != "a" {
+			t.Errorf("no -- right before the target: %q", argv)
+		}
 	}
 }

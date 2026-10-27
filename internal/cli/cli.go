@@ -14,6 +14,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/Bugslight8/labctl/internal/inventory"
 	"github.com/Bugslight8/labctl/internal/sshx"
@@ -146,7 +147,11 @@ func (a *App) off(ctx context.Context, names []string) error {
 		}
 	}
 	for _, h := range hosts {
-		if code, err := a.Exec(ctx, sshx.OffArgv(h, a.ControlDir)); err == nil && code == 0 {
+		code, err := a.Exec(ctx, sshx.OffArgv(h, a.ControlDir))
+		if err != nil {
+			return err
+		}
+		if code == 0 { // 255 = no shared connection open: nothing to close
 			fmt.Fprintf(a.Stdout, "closed %s\n", h.Name)
 		}
 	}
@@ -191,7 +196,7 @@ func (a *App) ls(ctx context.Context) error {
 		case !p.Online && h.MAC != "" && inv.Relay != "":
 			note = "wakeable"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", h.Name, state, p.OS, p.IP, seen, note)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", h.Name, state, printable(p.OS), printable(p.IP), seen, note)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -199,13 +204,24 @@ func (a *App) ls(ctx context.Context) error {
 	var extra []string
 	for _, p := range st.Peers {
 		if !listed[p.Name] {
-			extra = append(extra, p.Name)
+			extra = append(extra, printable(p.Name))
 		}
 	}
 	if len(extra) > 0 {
 		fmt.Fprintf(a.Stdout, "\non the tailnet, not in the hosts file: %s\n", strings.Join(extra, ", "))
 	}
 	return nil
+}
+
+// printable replaces control characters in what other tailnet devices report about themselves, so a peer cannot
+// send escape sequences to this terminal.
+func printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '?'
+		}
+		return r
+	}, s)
 }
 
 // ago is a short human age: 45s ago, 12m ago, 3h ago, 2d ago; "-" when unknown.
@@ -239,14 +255,19 @@ func (a *App) hostsInit(ctx context.Context) error {
 	b.WriteString("# relay = \"mini\"\n")
 	peers := append([]tailnet.Peer(nil), st.Peers...)
 	sort.Slice(peers, func(i, j int) bool { return peers[i].Name < peers[j].Name })
-	n := 0
+	n, written := 0, map[string]bool{}
 	for _, p := range peers {
+		if written[strings.ToLower(p.Name)] { // e.g. a node shared in from another tailnet with the same first label
+			fmt.Fprintf(a.Stderr, "skipped tailnet peer %q: a host with that name is already written\n", printable(p.Name))
+			continue
+		}
 		block := fmt.Sprintf("\n[[host]]\nname = %q\nos = %q\n# user = \"\"            # ssh login; default: ~/.ssh/config, then your local user\n# mac = \"\"             # Ethernet MAC, so the relay can wake this host\n# tmux = \"main\"        # session to attach; \"\" = plain shell\n", p.Name, p.OS)
 		if _, err := inventory.Parse([]byte(block)); err != nil {
 			fmt.Fprintf(a.Stderr, "skipped tailnet peer %q: %v\n", p.Name, err)
 			continue
 		}
 		b.WriteString(block)
+		written[strings.ToLower(p.Name)] = true
 		n++
 	}
 	if err := os.MkdirAll(filepath.Dir(a.HostsPath), 0o700); err != nil {

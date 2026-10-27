@@ -38,7 +38,7 @@ and `cmos check --quick` prints `CHECK: OK`.
 | Command | Result |
 |---|---|
 | `labctl hosts init` | writes the hosts file from tailscale status (refuses to overwrite an existing file) |
-| `labctl ls` | table: name, state (up / asleep / unknown-to-tailnet), OS, Tailscale IP, last seen |
+| `labctl ls` | table: name, state (up / asleep / not-on-tailnet), OS, Tailscale IP, last seen |
 | `labctl wake <host> [--no-wait]` | wake through the relay, wait until online |
 | `labctl wol <mac>` | send a magic packet from this machine (runs on the relay) |
 | `labctl <host>` | interactive shell: attach or create the host's tmux session (auto-wake if asleep and `mac` is set) |
