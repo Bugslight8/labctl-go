@@ -129,14 +129,22 @@ func (s *Status) Lookup(q string) (Peer, bool) {
 // macApp is where the Mac App Store and standalone Tailscale apps keep their CLI.
 const macApp = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 
+// Binary is the tailscale CLI on this machine: on PATH, else inside the macOS app.
+func Binary() (string, error) {
+	if bin, err := exec.LookPath("tailscale"); err == nil {
+		return bin, nil
+	}
+	if _, err := os.Stat(macApp); err != nil {
+		return "", fmt.Errorf("tailscale CLI not found: install Tailscale and sign in")
+	}
+	return macApp, nil
+}
+
 // Query runs `tailscale status --json` on this machine.
 func Query(ctx context.Context) (*Status, error) {
-	bin, err := exec.LookPath("tailscale")
+	bin, err := Binary()
 	if err != nil {
-		if _, statErr := os.Stat(macApp); statErr != nil {
-			return nil, fmt.Errorf("tailscale CLI not found: install Tailscale and sign in")
-		}
-		bin = macApp
+		return nil, err
 	}
 	out, err := exec.CommandContext(ctx, bin, "status", "--json").Output()
 	if err != nil && len(out) == 0 {

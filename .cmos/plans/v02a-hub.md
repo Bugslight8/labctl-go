@@ -79,8 +79,8 @@ host; a stranger gets 403), and `cmos check --quick` prints `CHECK: OK`.
 ### M3: API, access control, audit
 | # | Status | Files | Acceptance check |
 |---|---|---|---|
-| 5 | todo | NEW `internal/hub/auth.go`, NEW `internal/hub/auth_test.go` | `go test ./internal/hub -run 'TestAccess|TestIdentityIgnoresHeaders|TestWhoisArgv|TestListenAddrs'` passes |
-| 6 | todo | NEW `internal/hub/api.go`, NEW `internal/hub/api_test.go`, NEW `internal/hub/audit.go` | `go test ./internal/hub -run 'TestHostsAPI|TestEventsAPI|TestCSRF|TestWakeUnknownHost|TestWakeRateLimit|TestAuditFile'` passes |
+| 5 | done | NEW `internal/hub/auth.go`, NEW `internal/hub/auth_test.go` | `go test ./internal/hub -run 'TestAccess|TestIdentityIgnoresHeaders|TestWhoisArgv|TestListenAddrs'` passes |
+| 6 | done | NEW `internal/hub/api.go`, NEW `internal/hub/api_test.go`, NEW `internal/hub/audit.go` | `go test ./internal/hub -run 'TestHostsAPI|TestEventsAPI|TestCSRF|TestWakeUnknownHost|TestWakeRateLimit|TestAuditFile'` passes |
 
 ### M4: `labctl hub`, launchd install, end-to-end
 | # | Status | Files | Acceptance check |

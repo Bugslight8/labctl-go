@@ -174,6 +174,13 @@ func (m *Monitor) Hosts() []HostState {
 	return out
 }
 
+// Last is the newest event's Seq (0 before the first poll).
+func (m *Monitor) Last() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.seq
+}
+
 // Events returns the retained events with Seq > since. When since is older than the oldest retained event, the
 // first returned Seq is greater than since+1, so the client can see that it missed some.
 func (m *Monitor) Events(since uint64) []Event {
