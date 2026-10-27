@@ -35,6 +35,8 @@ type App struct {
 	Sleep          func(time.Duration)                                   // waits between tailnet polls while a host wakes
 	SendWOL        func(mac net.HardwareAddr, addr string) error         // sends a magic packet from this machine
 	Hub            func(ctx context.Context, args []string) error        // labctl hub ...; runs on the relay
+	HubClient      func(host string, port int) HubAPI                    // the client for hub_host
+	CachePath      string                                                // the last good hub host list
 }
 
 const usage = `labctl - command center for the home lab
@@ -107,15 +109,15 @@ func (a *App) run(ctx context.Context, args []string) error {
 
 // onHost opens a shell on the host (no cmd) or runs cmd there, passing its exit code through.
 func (a *App) onHost(ctx context.Context, name string, cmd []string) error {
-	inv, err := a.inventory()
+	v, err := a.load(ctx, true)
 	if err != nil {
 		return err
 	}
-	h, ok := inv.Find(name)
+	h, ok := v.inv.Find(name)
 	if !ok {
 		return fmt.Errorf("unknown command or host %q (labctl help; hosts are in %s)", name, a.HostsPath)
 	}
-	if err := a.autoWake(ctx, inv, h); err != nil {
+	if err := a.autoWake(ctx, v, h); err != nil {
 		return err
 	}
 	if err := sshx.EnsureControlDir(a.ControlDir); err != nil {
@@ -141,10 +143,11 @@ func (a *App) exec(ctx context.Context, argv []string) error {
 
 // off closes the shared connection of one host, or of every host. A host with no open connection is not an error.
 func (a *App) off(ctx context.Context, names []string) error {
-	inv, err := a.inventory()
+	v, err := a.load(ctx, false)
 	if err != nil {
 		return err
 	}
+	inv := v.inv
 	hosts := inv.Hosts
 	if len(names) > 0 {
 		hosts = nil
@@ -177,10 +180,14 @@ func (a *App) inventory() (*inventory.Inventory, error) {
 }
 
 func (a *App) ls(ctx context.Context) error {
-	inv, err := a.inventory()
+	v, err := a.load(ctx, true)
 	if err != nil {
 		return err
 	}
+	if v.live != nil {
+		return a.lsHub(v)
+	}
+	inv := v.inv
 	st, err := a.Status(ctx)
 	if err != nil {
 		return err

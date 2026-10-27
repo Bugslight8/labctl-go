@@ -50,7 +50,7 @@ after the hub stops; the binary itself cannot reach a test hub without an addres
 ### M2: ls, wake and <host> through the hub, with fallback
 | # | Status | Files | Acceptance check |
 |---|---|---|---|
-| 2 | todo | `internal/cli/cli.go`, `internal/cli/wake.go`, NEW `internal/cli/hub_test.go` | `go test ./internal/cli -run 'TestHubLs|TestHubWake|TestHubFallback'` passes |
+| 2 | done | `internal/cli/cli.go`, `internal/cli/wake.go`, NEW `internal/cli/hub_test.go` | `go test ./internal/cli -run 'TestHubLs|TestHubWake|TestHubFallback'` passes |
 
 ### M3: watch, end-to-end
 | # | Status | Files | Acceptance check |

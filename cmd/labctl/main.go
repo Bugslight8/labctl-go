@@ -6,20 +6,27 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/Bugslight8/labctl/internal/cli"
 	"github.com/Bugslight8/labctl/internal/hub"
+	"github.com/Bugslight8/labctl/internal/hubclient"
 	"github.com/Bugslight8/labctl/internal/inventory"
 	"github.com/Bugslight8/labctl/internal/tailnet"
 	"github.com/Bugslight8/labctl/internal/wol"
 )
 
-const version = "0.1.0-dev"
+const version = "0.2.0-dev"
 
 func main() {
 	cli.Version = version
+	os.Exit(newApp(hubclient.SystemDialer().DialContext).Run(context.Background(), os.Args[1:]))
+}
+
+// newApp is the real wiring. hubDial opens connections to the hub; only the end-to-end test swaps it.
+func newApp(hubDial func(ctx context.Context, network, addr string) (net.Conn, error)) *cli.App {
 	app := &cli.App{
 		Stdout:     os.Stdout,
 		Stderr:     os.Stderr,
@@ -30,7 +37,11 @@ func main() {
 		Exec:       cli.SystemExec,
 		Sleep:      time.Sleep,
 		SendWOL:    wol.Send,
+		HubClient: func(host string, port int) cli.HubAPI {
+			return hubclient.New(host, port, hubDial)
+		},
 	}
+	app.CachePath = filepath.Join(app.ControlDir, "hosts.json")
 	app.Hub = func(ctx context.Context, args []string) error {
 		ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -49,5 +60,5 @@ func main() {
 			LongPoll:  25 * time.Second,
 		}, hub.NewLaunchd(), os.Stdout)
 	}
-	os.Exit(app.Run(context.Background(), os.Args[1:]))
+	return app
 }

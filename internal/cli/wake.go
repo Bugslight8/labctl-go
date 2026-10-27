@@ -40,11 +40,11 @@ func (a *App) wakeCmd(ctx context.Context, args []string) error {
 	if name == "" {
 		return errors.New("usage: labctl wake <host> [--no-wait]")
 	}
-	inv, err := a.inventory()
+	v, err := a.load(ctx, true)
 	if err != nil {
 		return err
 	}
-	h, ok := inv.Find(name)
+	h, ok := v.inv.Find(name)
 	if !ok {
 		return fmt.Errorf("unknown host %q", name)
 	}
@@ -52,23 +52,40 @@ func (a *App) wakeCmd(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return a.wake(ctx, inv, h, st, wait)
+	return a.wake(ctx, v, h, st, wait)
 }
 
-// wake asks the relay to send h's magic packet, then (when wait) polls the tailnet until h is online.
-// Progress goes to Stderr: before an auto-woken command, Stdout belongs to that command's output.
-func (a *App) wake(ctx context.Context, inv *inventory.Inventory, h inventory.Host, st *tailnet.Status, wait bool) error {
-	if h.MAC == "" {
-		return fmt.Errorf("%s has no mac in %s, so it cannot be woken", h.Name, a.HostsPath)
-	}
-	if inv.Relay == "" {
-		return fmt.Errorf("no relay in %s: set relay = \"<always-on host>\"", a.HostsPath)
+// wake sends h's magic packet, through the hub when it holds h's MAC, else through the relay, then (when wait)
+// polls the tailnet until h is online. Progress goes to Stderr: before an auto-woken command, Stdout belongs to
+// that command's output.
+func (a *App) wake(ctx context.Context, v *view, h inventory.Host, st *tailnet.Status, wait bool) error {
+	viaHub := v.hub != nil && h.HubWakeable
+	if !viaHub {
+		if h.MAC == "" {
+			return fmt.Errorf("%s has no mac in %s, so it cannot be woken", h.Name, a.HostsPath)
+		}
+		if v.inv.Relay == "" {
+			return fmt.Errorf("no relay in %s: set relay = \"<always-on host>\"", a.HostsPath)
+		}
 	}
 	p, onTailnet := st.Lookup(h.Tailnet)
 	if onTailnet && p.Online {
 		fmt.Fprintf(a.Stdout, "%s is already up\n", h.Name)
 		return nil
 	}
+	if viaHub {
+		fmt.Fprintf(a.Stderr, "waking %s via the hub ...\n", h.Name)
+		if err := v.hub.Wake(ctx, h.Name); err != nil {
+			return err
+		}
+	} else if err := a.wakeViaRelay(ctx, v.inv, h, st); err != nil {
+		return err
+	}
+	return a.waitUp(ctx, h, onTailnet, wait)
+}
+
+// wakeViaRelay has the relay run `labctl wol <mac>` over ssh.
+func (a *App) wakeViaRelay(ctx context.Context, inv *inventory.Inventory, h inventory.Host, st *tailnet.Status) error {
 	relay, _ := inv.Find(inv.Relay)
 	if p, ok := st.Lookup(relay.Tailnet); !ok || !p.Online {
 		return fmt.Errorf("the relay %s is not online, so nothing can send the wake packet", relay.Name)
@@ -88,6 +105,11 @@ func (a *App) wake(ctx context.Context, inv *inventory.Inventory, h inventory.Ho
 	if code != 0 {
 		return fmt.Errorf("the relay %s could not send the wake packet (exit %d): is labctl installed there?", relay.Name, code)
 	}
+	return nil
+}
+
+// waitUp polls the tailnet until h is online, up to wakeTimeout.
+func (a *App) waitUp(ctx context.Context, h inventory.Host, onTailnet, wait bool) error {
 	if !wait {
 		return nil
 	}
@@ -112,13 +134,13 @@ func (a *App) wake(ctx context.Context, inv *inventory.Inventory, h inventory.Ho
 		}
 	}
 	return fmt.Errorf("%s did not come online within %d s. Check Wake-on-LAN on it: enabled in the firmware and on the "+
-		"network adapter, connected by Ethernet (Wi-Fi rarely wakes), and mac = %s is its Ethernet MAC",
-		h.Name, int(wakeTimeout.Seconds()), h.MAC)
+		"network adapter, connected by Ethernet (Wi-Fi rarely wakes), and its mac in the hosts file is its Ethernet MAC",
+		h.Name, int(wakeTimeout.Seconds()))
 }
 
 // autoWake wakes h before a shell or command when the tailnet says it is asleep. Anything it cannot decide
 // (tailscale unavailable, host unknown to the tailnet) falls through to ssh, which gives its own error.
-func (a *App) autoWake(ctx context.Context, inv *inventory.Inventory, h inventory.Host) error {
+func (a *App) autoWake(ctx context.Context, v *view, h inventory.Host) error {
 	st, err := a.Status(ctx)
 	if err != nil {
 		return nil
@@ -127,8 +149,12 @@ func (a *App) autoWake(ctx context.Context, inv *inventory.Inventory, h inventor
 	if !ok || p.Online {
 		return nil
 	}
+	inv := v.inv
 	reason := ""
 	switch {
+	case v.hub != nil && h.HubWakeable:
+	case v.hub != nil:
+		reason = "the hub has no mac for it"
 	case strings.EqualFold(h.Name, inv.Relay):
 		reason = "it is the relay itself; nothing else can send its wake packet"
 	case h.MAC == "":
@@ -141,7 +167,7 @@ func (a *App) autoWake(ctx context.Context, inv *inventory.Inventory, h inventor
 			h.Name, ago(a.Now(), p.LastSeen), reason)
 		return nil
 	}
-	return a.wake(ctx, inv, h, st, true)
+	return a.wake(ctx, v, h, st, true)
 }
 
 // wolCmd: labctl wol <mac> [--to host:port] sends the magic packet from this machine.
