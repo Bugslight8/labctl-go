@@ -346,3 +346,28 @@ func TestAuditFile(t *testing.T) {
 		t.Errorf("reopened audit file mode %v", fi.Mode().Perm())
 	}
 }
+
+// review round 2: the refusal dedupe must not hide wake attempts. Every refused wake is logged, at most once per
+// address per host per minute (unknown names share one slot, so made-up names cannot flood the log).
+func TestAuditRefusedWakes(t *testing.T) {
+	h := newAPI(t)
+	stranger := strangerAddr + ":4000"
+	h.do("GET", "/v1/hosts", stranger, nil)
+	h.do("POST", "/v1/wake/fabric-twin", stranger, wakeHdr) // logged, despite the GET refusal just before
+	h.do("POST", "/v1/wake/fabric-twin", stranger, wakeHdr) // same host, same minute: not again
+	h.do("POST", "/v1/wake/nas", stranger, wakeHdr)         // another host: logged
+	h.do("POST", "/v1/wake/ghost1", stranger, wakeHdr)      // unknown names: one slot together
+	h.do("POST", "/v1/wake/ghost2", stranger, wakeHdr)
+	h.srv.Audit.Close()
+	data, _ := os.ReadFile(filepath.Join(h.dir, "audit.jsonl"))
+	var got []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var r AuditRecord
+		json.Unmarshal([]byte(line), &r)
+		got = append(got, r.Action+" "+r.Host)
+	}
+	want := "GET /v1/hosts |wake fabric-twin|wake nas|wake ghost1"
+	if strings.Join(got, "|") != want {
+		t.Errorf("records %q\nwant    %q", strings.Join(got, "|"), want)
+	}
+}

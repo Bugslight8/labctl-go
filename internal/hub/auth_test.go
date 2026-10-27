@@ -260,3 +260,32 @@ func TestWhoisLimits(t *testing.T) {
 		t.Errorf("40 addresses: %d calls, peak %d concurrent (max %d)", calls, peak, whoisMax)
 	}
 }
+
+// review round 2: a shared lookup must not fail for everyone when the request that started it hangs up
+func TestSharedLookupSurvivesFirstCallerCancel(t *testing.T) {
+	release := make(chan struct{})
+	whois := func(ctx context.Context, _ netip.Addr) (Caller, error) {
+		select {
+		case <-release:
+			return Caller{Login: "owner@example.com"}, nil
+		case <-ctx.Done():
+			return Caller{}, ctx.Err()
+		}
+	}
+	a := NewAuthorizer([]string{"owner@example.com"}, whois, time.Now)
+	addr := netip.MustParseAddr(ownerAddr)
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() { _, err := a.lookup(firstCtx, addr); firstDone <- err }()
+	time.Sleep(20 * time.Millisecond) // first caller owns the in-flight lookup
+	second := make(chan error, 1)
+	go func() { _, err := a.lookup(context.Background(), addr); second <- err }()
+	time.Sleep(20 * time.Millisecond)
+	cancelFirst()
+	time.Sleep(20 * time.Millisecond) // the hang-up must not end the shared lookup
+	close(release)
+	if err := <-second; err != nil {
+		t.Errorf("the waiting caller got %v after the first caller hung up", err)
+	}
+	<-firstDone
+}

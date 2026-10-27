@@ -32,10 +32,14 @@ host; a stranger gets 403), and `cmos check --quick` prints `CHECK: OK`.
   - `GET /v1/events?since=<seq>` -> events after seq; waits up to 25 s for a new one (long poll, live updates).
   - `POST /v1/wake/<name>` -> sends the magic packet from the hub (`wol.Send`), 1 per host per 10 s, then 202.
 - Access: listen only on this machine's Tailscale addresses (`tailscale ip`), never 0.0.0.0. Each request: caller =
-  `tailscale whois --json <RemoteAddr>` (cached 60 s per address) -> `UserProfile.LoginName` must be in `allow`;
-  tagged devices are refused. Identity comes from RemoteAddr only, never from a header.
-- Audit: every wake (allowed or refused) and every refused request -> one JSON line in
-  `~/.local/state/labctl/audit.jsonl` (mode 0600): time, login, device, remote addr, action, host, result.
+  `tailscale whois --json -- <RemoteAddr>` -> `UserProfile.LoginName` must be in `allow`; tagged devices and the hub
+  machine's own addresses (a local program would pass as the owner) are refused. Identity comes from RemoteAddr only,
+  never from a header. Lookups: cached 10 s (failures 5 s), one per address at a time, at most 4 at once.
+  The Host header must be one of the hub's MagicDNS names or Tailscale IPs, and requests with Origin or Sec-Fetch-*
+  headers are refused (CSRF, DNS rebinding). Headers are capped at 8 KB.
+- Audit: one JSON line in `~/.local/state/labctl/audit.jsonl` (mode 0600, rotated to `.1` at 10 MB): time, login,
+  device, remote addr, action, host, result. Every allowed wake; every refused wake, at most once per address per
+  host per minute (unknown names share one slot); other refused requests once per address per minute, path clipped.
 - `labctl hub` serves; `labctl hub install` writes `~/Library/LaunchAgents/com.labctl.hub.plist` (RunAtLoad,
   KeepAlive, logs to `~/.local/state/labctl/hub.log`) and runs `launchctl bootstrap gui/<uid>`; `labctl hub uninstall`
   reverses it. Linux/systemd: v0.3.
@@ -95,5 +99,5 @@ host; a stranger gets 403), and `cmos check --quick` prints `CHECK: OK`.
 
 ## Risks
 - A stale tailnet "online" for a sleeping host: the port-22 probe turns it into `unreachable`; TestPoll covers it.
-- whois latency on every request: cached 60 s per address; TestAccess checks one whois per address per minute.
+- whois latency on every request: cached 10 s per address and shared; TestAccess and TestWhoisLimits check it.
 - The hub dies or the mini reboots: launchd KeepAlive + RunAtLoad; checked by TestLaunchd on the plist content.

@@ -20,6 +20,7 @@ const (
 	whoisTTL     = 10 * time.Second // short: Tailscale can hand an address to another device
 	whoisFailTTL = 5 * time.Second  // failed lookups are cached too, so a stranger cannot make one per request
 	whoisMax     = 4                // concurrent `tailscale whois` processes, across all addresses
+	whoisTimeout = 5 * time.Second
 )
 
 // Tailscale assigns addresses only from these ranges; the hub trusts whois answers only for them.
@@ -193,18 +194,19 @@ func (a *Authorizer) lookup(ctx context.Context, addr netip.Addr) (Caller, error
 	a.inflight[addr] = cl
 	a.mu.Unlock()
 
+	// the lookup is shared, so it must not end when the request that started it hangs up
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), whoisTimeout)
+	defer cancel()
 	select {
 	case a.sem <- struct{}{}:
-		cl.c, cl.err = a.whois(ctx, addr)
+		cl.c, cl.err = a.whois(wctx, addr)
 		<-a.sem
-	case <-ctx.Done():
-		cl.err = ctx.Err()
+	case <-wctx.Done():
+		cl.err = wctx.Err()
 	}
 	a.mu.Lock()
 	delete(a.inflight, addr)
-	if ctx.Err() == nil { // a caller hanging up is not an answer about the address
-		a.cache[addr] = cached{c: cl.c, err: cl.err, at: a.now()}
-	}
+	a.cache[addr] = cached{c: cl.c, err: cl.err, at: a.now()}
 	a.mu.Unlock()
 	close(cl.done)
 	return cl.c, cl.err

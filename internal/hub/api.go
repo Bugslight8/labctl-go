@@ -110,24 +110,32 @@ func (s *Server) allowedHost(h string) bool {
 	return false
 }
 
-// deny audits a refusal: at most once per address per minute, with the path cut short.
+// deny audits a refusal, with the path cut short. Wake attempts are always logged, once per address per host per
+// minute (unknown names share one slot, so made-up names cannot flood the log); other refusals once per address per
+// minute.
 func (s *Server) deny(r *http.Request, c Caller, reason string) {
+	rec := AuditRecord{Login: c.Login, Device: c.Device, Addr: c.Addr, Action: clip(r.Method + " " + r.URL.Path), Result: "denied: " + reason}
+	key := c.Addr
+	if name, ok := strings.CutPrefix(r.URL.Path, "/v1/wake/"); ok {
+		rec.Action, rec.Host = "wake", clip(name)
+		slot := "?"
+		if h, ok := s.Inv.Find(name); ok {
+			rec.Host, slot = h.Name, h.Name
+		}
+		key += "|wake|" + slot
+	}
 	now := s.Now()
 	s.mu.Lock()
 	if s.lastDenied == nil || len(s.lastDenied) > 10000 {
 		s.lastDenied = map[string]time.Time{}
 	}
-	last, seen := s.lastDenied[c.Addr]
+	last, seen := s.lastDenied[key]
 	if seen && now.Sub(last) < denyLogEvery {
 		s.mu.Unlock()
 		return
 	}
-	s.lastDenied[c.Addr] = now
+	s.lastDenied[key] = now
 	s.mu.Unlock()
-	rec := AuditRecord{Login: c.Login, Device: c.Device, Addr: c.Addr, Action: clip(r.Method + " " + r.URL.Path), Result: "denied: " + reason}
-	if name, ok := strings.CutPrefix(r.URL.Path, "/v1/wake/"); ok {
-		rec.Action, rec.Host = "wake", clip(name)
-	}
 	s.Audit.Log(rec)
 }
 
