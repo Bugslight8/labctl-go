@@ -1,0 +1,1 @@
+- [labctl hub verify](labctl-hub-verify.md) — safe fakes setup, verdict file path, shell traps

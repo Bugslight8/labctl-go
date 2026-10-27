@@ -1,7 +1,7 @@
 ---
 slug: v02a-hub
 title: labctl v0.2a - the hub on the Mac mini (state, events, wake, access control, launchd)
-status: building
+status: ready
 tier: sensitive
 created: 2026-10-26
 depends: v01-foundation

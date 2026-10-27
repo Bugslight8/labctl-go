@@ -18,3 +18,21 @@ Trust boundaries of labctl, as they stood at v01-foundation (review of 2026-10-2
 **How to apply:** on the next review, re-check these points first, and re-verify the `--` placement.
 
 Practical: a ControlPath longer than 104 bytes fails on macOS. For a local proof, use a short relative HOME (cd into the scratchpad, HOME=h).
+
+Hub (v02a-hub review, 2026-10-26, tree d6d5bae; internal/hub):
+- Caller identity = RemoteAddr -> `tailscale whois` -> [hub] allow. Verified live on a Mac: a local connect to the
+  machine's own tailnet IP arrives FROM that IP, and whois of the own IP returns self + the owner's login, so local
+  processes pass as the owner unless own IPs are refused (finding M1). Re-check this on every hub review.
+- The guard and the deny path write the audit log BEFORE auth: any bytes logged there are under attacker control (M2).
+  Check for truncation, MaxHeaderBytes and rate limits.
+- Origin/X-Labctl stops CSRF on POST but not DNS rebinding on GET. The Host header must be allow-listed (M3).
+- whois is a subprocess per cache miss: check that misses are deduplicated and limited (M4).
+- macOS here has net.inet.ip.check_interface=1, so LAN packets to the utun IP are dropped. The mini is UNKNOWN.
+- Proof method that worked: `git archive HEAD | tar -x` into the scratchpad, add a zz_proof_test.go, then
+  `go test -count=1 -run TestProof`.
+- Round 2 (1fafecc, 2026-10-26): M1-M4 fixed. The fixes are the self refusal (Authorizer.RefuseFrom), the Host
+  allow-list plus Sec-Fetch refusal, deny dedupe with clipping plus rotation, and whois singleflight plus semaphore.
+  On later reviews, check that new endpoints sit behind guard -> Wrap, and that dedupe does not hide wake refusals
+  (L2 was fixed in a238a20: wake refusals are keyed addr|wake|<canonical name or ?>; the shared whois runs
+  detached with a 5 s deadline under the semaphore of 4). The dedupe key must stay canonical (inventory.Find), or
+  made-up names would reopen the log flood.
