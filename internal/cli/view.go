@@ -25,9 +25,10 @@ type HubAPI interface {
 
 // view is what one command works from: the hosts, and the hub when it answered.
 type view struct {
-	inv  *inventory.Inventory
-	hub  HubAPI             // nil in direct mode
-	live *hub.HostsResponse // the hub's answer, when it answered
+	inv   *inventory.Inventory
+	local *inventory.Inventory // the hosts file alone
+	hub   HubAPI               // nil in direct mode
+	live  *hub.HostsResponse   // the hub's answer, when it answered
 }
 
 // load reads the hosts file and, when it names a hub, asks the hub for the host list (merged under the local
@@ -39,24 +40,37 @@ func (a *App) load(ctx context.Context, askHub bool) (*view, error) {
 		return nil, err
 	}
 	if local.HubHost == "" || a.HubClient == nil {
-		return &view{inv: local}, nil
+		return &view{inv: local, local: local}, nil
 	}
 	if !askHub {
 		inv, _ := a.fallback(local)
-		return &view{inv: inv}, nil
+		return &view{inv: inv, local: local}, nil
 	}
 	c := a.HubClient(local.HubHost, local.HubPort)
 	resp, err := c.Hosts(ctx)
 	if err != nil {
 		inv, note := a.fallback(local)
 		fmt.Fprintf(a.Stderr, "labctl: hub %s unreachable (%v); direct mode%s\n", local.HubHost, err, note)
-		return &view{inv: inv}, nil
+		return &view{inv: inv, local: local}, nil
 	}
 	a.saveCache(resp)
 	hosts, _ := hubclient.Inventory(resp) // c.Hosts has already refused any unsafe host
 	inv := *local
-	inv.Hosts, inv.Relay = merge(local.Hosts, hosts), resp.Relay
-	return &view{inv: &inv, hub: c, live: resp}, nil
+	inv.Hosts, inv.Relay = merge(local.Hosts, hosts), relayFor(local, resp.Relay)
+	return &view{inv: &inv, local: local, hub: c, live: resp}, nil
+}
+
+// relayFor applies the hosts rule to the relay: the local file's relay wins; one from the hub (or its cache) is
+// used only when the local file sets none, and only when it names a host of the local file. A relay is an ssh
+// login that runs labctl wol, so its tailnet and user must come from the local file, never from the hub.
+func relayFor(local *inventory.Inventory, other string) string {
+	if local.Relay != "" {
+		return local.Relay
+	}
+	if h, ok := local.Find(other); ok && other != "" {
+		return h.Name
+	}
+	return ""
 }
 
 func (a *App) saveCache(resp *hub.HostsResponse) {
@@ -114,12 +128,7 @@ func (a *App) fallback(local *inventory.Inventory) (*inventory.Inventory, string
 		return &inv, "; ignoring the cached host list: " + err.Error()
 	}
 	hosts, _ := hubclient.Inventory(cached) // LoadCache has already refused any unsafe host
-	inv.Hosts = merge(local.Hosts, hosts)
-	if inv.Relay == "" {
-		if _, ok := inv.Find(cached.Relay); ok {
-			inv.Relay = cached.Relay
-		}
-	}
+	inv.Hosts, inv.Relay = merge(local.Hosts, hosts), relayFor(local, cached.Relay)
 	return &inv, ", hosts cached " + ago(time.Now(), at) // file times are wall-clock
 }
 

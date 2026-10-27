@@ -65,6 +65,10 @@ func (a *App) wake(ctx context.Context, v *view, h inventory.Host, st *tailnet.S
 		if h.MAC == "" && v.hub != nil {
 			return fmt.Errorf("the hub has no mac for %s, so it cannot be woken: add mac = ... to %s on the hub", h.Name, h.Name)
 		}
+		if _, inFile := v.local.Find(h.Name); h.MAC == "" && !inFile {
+			return fmt.Errorf("%s comes from the hub's host list, and only the hub can wake it (it is not answering); "+
+				"to wake it without the hub, add it with mac = ... to %s", h.Name, a.HostsPath)
+		}
 		if h.MAC == "" {
 			return fmt.Errorf("%s has no mac in %s, so it cannot be woken", h.Name, a.HostsPath)
 		}

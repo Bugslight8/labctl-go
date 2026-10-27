@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -56,9 +57,10 @@ func TestCacheSurvivesBadAnswer(t *testing.T) {
 // review R3: the cached relay is used when the local file names none; a cached HubWakeable never means the hub
 // when the hub is down
 func TestFallbackCachedRelay(t *testing.T) {
-	h := newHarness(t, clientHosts+"[[host]]\nname = \"fabric-twin\"\nmac = \"aa:bb:cc:dd:ee:01\"\n")
+	// the cached relay counts only because mini is also in the local file (TestRelayLocalWins has the other cases)
+	h := newHarness(t, clientHosts+"[[host]]\nname = \"mini\"\n[[host]]\nname = \"fabric-twin\"\nmac = \"aa:bb:cc:dd:ee:01\"\n")
 	f, ssh := withHub(t, h)
-	h.run("ls") // caches relay = mini and the hub's mini
+	h.run("ls") // caches relay = mini
 	f.err = errors.New("hub down")
 	h.app.Exec = func(ctx context.Context, argv []string) (int, error) {
 		if strings.Contains(strings.Join(argv, " "), "labctl wol") {
@@ -76,7 +78,7 @@ func TestFallbackCachedRelay(t *testing.T) {
 	f2.hosts.Hosts = append(f2.hosts.Hosts, hub.HostInfo{Name: "phone", Tailnet: "phone", Tmux: "main", Wakeable: true})
 	h2.run("ls")
 	f2.err = errors.New("hub down")
-	if code := h2.run("wake", "phone"); code == 0 || !strings.Contains(h2.errOut.String(), "no mac") {
+	if code := h2.run("wake", "phone"); code == 0 || !strings.Contains(h2.errOut.String(), "only the hub can wake it") {
 		t.Errorf("hub-only host with the hub down: exit %d, %q", code, h2.errOut)
 	}
 }
@@ -101,5 +103,81 @@ func TestHubWakeMessages(t *testing.T) {
 	h.errOut.Reset()
 	if code := h.run("wake", "mini"); code == 0 || !strings.Contains(h.errOut.String(), "the hub has no mac for mini") {
 		t.Errorf("exit %d, %q", code, h.errOut)
+	}
+}
+
+// review/security round 2: the relay follows the same rule as hosts. The local relay always wins; one from the hub
+// (or its cache) is used only when the local file sets none, and only when it names a host of the local file
+// (never a host only the hub lists, with the hub's tailnet and user).
+func TestRelayLocalWins(t *testing.T) {
+	const local = "[[host]]\nname = \"mini\"\n[[host]]\nname = \"fabric-twin\"\nmac = \"aa:bb:cc:dd:ee:01\"\n"
+	cases := []struct {
+		what, file, hubRelay string
+		hubOnly              *hub.HostInfo
+		wantRelay            string // "" = no relay: wake fails
+	}{
+		{"local relay, hub sends none", clientHosts + "relay = \"mini\"\n" + local, "", nil, "mini"},
+		{"local relay, hub names a hub-only host", clientHosts + "relay = \"mini\"\n" + local, "r",
+			&hub.HostInfo{Name: "r", Tailnet: "pi", User: "root", Tmux: "main"}, "mini"},
+		{"no local relay, hub names a local host", clientHosts + local, "mini", nil, "mini"},
+		{"no local relay, hub names a hub-only host", clientHosts + local, "r",
+			&hub.HostInfo{Name: "r", Tailnet: "pi", User: "root", Tmux: "main"}, ""},
+	}
+	for _, c := range cases {
+		for _, hubDown := range []bool{false, true} {
+			h := newHarness(t, c.file)
+			f, ssh := withHub(t, h)
+			f.hosts.Relay = c.hubRelay
+			f.hosts.Hosts[1].Wakeable = false // the hub cannot wake fabric-twin: the local mac and relay must
+			if c.hubOnly != nil {
+				f.hosts.Hosts = append(f.hosts.Hosts, *c.hubOnly)
+			}
+			h.run("ls") // caches the hub's answer
+			if hubDown {
+				f.err = errors.New("hub down")
+			}
+			h.app.Exec = func(ctx context.Context, argv []string) (int, error) {
+				if strings.Contains(strings.Join(argv, " "), "labctl wol") {
+					h.tn.set("fabric-twin", true)
+				}
+				return ssh.exec(ctx, argv)
+			}
+			code := h.run("wake", "fabric-twin")
+			label := c.what
+			if hubDown {
+				label += " (hub down, from the cache)"
+			}
+			switch {
+			case c.wantRelay == "" && (code == 0 || !strings.Contains(h.errOut.String(), "no relay")):
+				t.Errorf("%s: exit %d, ssh %q, stderr %q", label, code, ssh.last(), h.errOut)
+			case c.wantRelay != "" && (code != 0 || !strings.Contains(ssh.last(), "-T -- "+c.wantRelay+" PATH=")):
+				t.Errorf("%s: exit %d, ssh %q, stderr %q", label, code, ssh.last(), h.errOut)
+			}
+		}
+	}
+}
+
+// review round 2: a host known only from the hub's (cached) list is not blamed on the local file
+func TestNoMacMessageForHubHost(t *testing.T) {
+	h := newHarness(t, clientHosts)
+	f, _ := withHub(t, h)
+	h.run("ls")
+	f.err = errors.New("hub down")
+	h.errOut.Reset()
+	if code := h.run("wake", "fabric-twin"); code == 0 || !strings.Contains(h.errOut.String(), "from the hub's host list") {
+		t.Errorf("exit %d, %q", code, h.errOut)
+	}
+}
+
+// review round 2: a cache that cannot be written is reported
+func TestCacheWriteErrorIsReported(t *testing.T) {
+	h := newHarness(t, clientHosts)
+	withHub(t, h)
+	blocker := filepath.Join(t.TempDir(), "file")
+	os.WriteFile(blocker, nil, 0o600)
+	h.app.CachePath = filepath.Join(blocker, "hosts.json") // its directory is a file
+	h.run("ls")
+	if !strings.Contains(h.errOut.String(), "caching the hub's host list") {
+		t.Errorf("stderr %q", h.errOut)
 	}
 }
