@@ -55,7 +55,7 @@ after the hub stops; the binary itself cannot reach a test hub without an addres
 ### M3: watch, end-to-end
 | # | Status | Files | Acceptance check |
 |---|---|---|---|
-| 3 | todo | NEW `internal/cli/watch.go`, `internal/cli/hub_test.go`, NEW `cmd/labctl/e2e_hub_test.go`, `README.md` | `go test ./cmd/labctl -run TestEndToEndHub -v` prints `--- PASS: TestEndToEndHub`; `go test ./internal/cli -run TestWatch` passes |
+| 3 | done | NEW `internal/cli/watch.go`, `internal/cli/hub_test.go`, NEW `cmd/labctl/e2e_hub_test.go`, `README.md` | `go test ./cmd/labctl -run TestEndToEndHub -v` prints `--- PASS: TestEndToEndHub`; `go test ./internal/cli -run TestWatch` passes |
 
 ## Out of scope
 - Phone dashboard (v0.5). Nodes and VMs (v0.3).

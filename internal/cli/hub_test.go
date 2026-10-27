@@ -16,12 +16,14 @@ import (
 
 // fakeHubAPI answers like the hub; err makes it unreachable.
 type fakeHubAPI struct {
-	hosts  hub.HostsResponse
-	err    error
-	wakes  []string
-	onWake func(name string)
-	events []hub.EventsResponse // answered in order; then blocks until ctx ends
-	polls  []string             // "since boot" per Events call
+	hosts      hub.HostsResponse
+	err        error
+	wakes      []string
+	onWake     func(name string)
+	events     []hub.EventsResponse // answered in order; then drained is called and Events blocks until ctx ends
+	polls      []string             // "since boot" per Events call
+	drained    func()
+	failEvents int // the next n Events calls fail
 }
 
 func (f *fakeHubAPI) Hosts(context.Context) (*hub.HostsResponse, error) {
@@ -33,11 +35,18 @@ func (f *fakeHubAPI) Hosts(context.Context) (*hub.HostsResponse, error) {
 }
 
 func (f *fakeHubAPI) Events(ctx context.Context, since uint64, boot string) (*hub.EventsResponse, error) {
+	if f.failEvents > 0 {
+		f.failEvents--
+		return nil, errors.New("connection refused")
+	}
 	f.polls = append(f.polls, strings.TrimSpace(strconv.FormatUint(since, 10)+" "+boot))
 	if f.err != nil {
 		return nil, f.err
 	}
 	if len(f.events) == 0 {
+		if f.drained != nil {
+			f.drained()
+		}
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
@@ -198,4 +207,96 @@ func hasField(out, fields string) bool {
 		}
 	}
 	return false
+}
+
+func ev(seq uint64, host, from, to string) hub.Event {
+	return hub.Event{Seq: seq, Time: now.Add(time.Duration(seq) * time.Second), Host: host, From: from, To: to}
+}
+
+// runWatch runs labctl watch until the fake hub has no more answers, then stops it like Ctrl-C would.
+func runWatch(t *testing.T, h *harness, f *fakeHubAPI) int {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	f.drained = cancel
+	done := make(chan int, 1)
+	go func() { done <- h.app.Run(ctx, []string{"watch"}) }()
+	select {
+	case code := <-done:
+		return code
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("watch did not stop")
+		return -1
+	}
+}
+
+func TestWatch(t *testing.T) {
+	h := newHarness(t, clientHosts)
+	f, _ := withHub(t, h)
+	var first []hub.Event
+	for i := uint64(1); i <= 12; i++ {
+		first = append(first, ev(i, "fabric-twin", "up", "asleep"))
+	}
+	f.events = []hub.EventsResponse{
+		{Events: first, Last: 12, Boot: "b1"},
+		{Events: []hub.Event{ev(13, "fabric-twin", "asleep", "up")}, Last: 13, Boot: "b1"},
+		{Events: []hub.Event{ev(1, "mini", "", "up")}, Last: 1, Boot: "b2"}, // the hub restarted
+	}
+	if code := runWatch(t, h, f); code != 0 {
+		t.Fatalf("exit %d: %s", code, h.errOut)
+	}
+	lines := strings.Split(strings.TrimSpace(h.out.String()), "\n")
+	if len(lines) != 12 { // the last 10 of the history, then the live one, then the one after the restart
+		t.Fatalf("%d lines:\n%s", len(lines), h.out)
+	}
+	if !strings.Contains(lines[0], "fabric-twin") || !strings.Contains(lines[10], "asleep -> up") || !strings.Contains(lines[11], "mini") || !strings.Contains(lines[11], "(start) -> up") {
+		t.Errorf("output:\n%s", h.out)
+	}
+	if strings.Join(f.polls, "|") != "0|12 b1|13 b1|1 b2" {
+		t.Errorf("polls %q", f.polls)
+	}
+	if !strings.Contains(h.errOut.String(), "hub restarted") {
+		t.Errorf("stderr %q", h.errOut)
+	}
+}
+
+func TestWatchRetries(t *testing.T) {
+	h := newHarness(t, clientHosts)
+	f, _ := withHub(t, h)
+	sleeps := 0
+	h.app.Sleep = func(time.Duration) {
+		if sleeps++; sleeps == 3 {
+			f.err = nil // the hub comes back
+		}
+	}
+	h.app.Run(context.Background(), []string{"ls"}) // load works; then the hub fails for the watch polls
+	f.failEvents = 3
+	f.events = []hub.EventsResponse{{Events: []hub.Event{ev(1, "mini", "", "up")}, Last: 1, Boot: "b1"}}
+	h.errOut.Reset()
+	h.out.Reset()
+	runWatch(t, h, f)
+	if n := strings.Count(h.errOut.String(), "retrying"); n != 1 {
+		t.Errorf("a failure streak must be reported once, got %d:\n%s", n, h.errOut)
+	}
+	if !strings.Contains(h.out.String(), "mini") {
+		t.Errorf("no event after the hub came back:\n%s", h.out)
+	}
+}
+
+func TestWatchNeedsHub(t *testing.T) {
+	h := newHarness(t, hostsFile)
+	if code := h.run("watch"); code == 0 || !strings.Contains(h.errOut.String(), "hub_host") {
+		t.Errorf("exit %d, %q", code, h.errOut)
+	}
+}
+
+// T3: event text comes from the hub; escape sequences must not reach the terminal
+func TestWatchStripsControlChars(t *testing.T) {
+	h := newHarness(t, clientHosts)
+	f, _ := withHub(t, h)
+	f.events = []hub.EventsResponse{{Events: []hub.Event{ev(1, "evil\x1b[2J", "up\x07", "\x1b]0;pwned\x07")}, Last: 1, Boot: "b"}}
+	runWatch(t, h, f)
+	if strings.ContainsAny(h.out.String()+h.errOut.String(), "\x1b\x07") {
+		t.Errorf("control characters reached the terminal: %q", h.out)
+	}
 }

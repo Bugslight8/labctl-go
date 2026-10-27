@@ -36,3 +36,16 @@ wake requests to your own devices over the tailnet, and logs every wake to `~/.l
 
 It listens only on the mini's Tailscale addresses (port 7300), identifies every caller with `tailscale whois`, refuses
 tagged devices and browser-style requests, and sends Wake-on-LAN itself, at most once per host every 10 s.
+
+## Using the hub from your devices (v0.2)
+On the MacBook (and any other device), the hosts file can be one line:
+```toml
+hub_host = "mini"   # the hub's MagicDNS name
+```
+- `labctl ls` shows the hub's state for every host, and since when.
+- `labctl wake <host>` asks the hub (it holds the MACs), and `labctl <host>` uses the hub's hosts list.
+- `labctl watch` streams the hub's events live.
+- When the hub does not answer, labctl says so once and works in direct mode from its cached copy of the list
+  (`~/.cache/labctl/hosts.json`) plus any hosts in the local file, which can still wake through the relay.
+
+labctl only connects to the hub at a Tailscale address, and refuses a host list with unsafe names.

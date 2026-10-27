@@ -48,12 +48,15 @@ const usage = `labctl - command center for the home lab
   labctl wol <mac>            send a Wake-on-LAN packet from this machine (the relay runs this)
   labctl <host>               shell on the host, in its tmux session (wakes it first when it is asleep)
   labctl <host> <cmd...>      run a command there; one quoted argument runs as a shell string
+  labctl watch                the hub's events, live: who went to sleep, woke, became unreachable (Ctrl-C stops)
   labctl off [host]           close the shared SSH connections
   labctl version
 
   on the always-on relay (the Mac mini), with a [hub] table in its hosts file:
   labctl hub                  run the hub: watch every host, serve state and wake requests to allowed logins
   labctl hub install          run it as a launchd login service (restarts if it stops); hub uninstall removes it
+
+  to use the hub from any device, put hub_host = "<its MagicDNS name>" in that device's hosts file
 `
 
 // Run executes one command line and returns the process exit code.
@@ -96,6 +99,8 @@ func (a *App) run(ctx context.Context, args []string) error {
 		return a.off(ctx, args[1:])
 	case "wake":
 		return a.wakeCmd(ctx, args[1:])
+	case "watch":
+		return a.watch(ctx)
 	case "wol":
 		return a.wolCmd(args[1:])
 	case "hub":
