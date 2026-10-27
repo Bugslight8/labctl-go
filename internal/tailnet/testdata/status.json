@@ -1,0 +1,23 @@
+{
+  "Version": "1.102.4",
+  "BackendState": "Running",
+  "MagicDNSSuffix": "tail0000.ts.net",
+  "Self": {
+    "HostName": "MacBook-Pro", "DNSName": "macbook-pro.tail0000.ts.net.", "OS": "macOS",
+    "Online": true, "LastSeen": "0001-01-01T00:00:00Z", "TailscaleIPs": ["100.64.0.1", "fd7a:115c:a1e0::1"]
+  },
+  "Peer": {
+    "nodekey:aaa": {
+      "HostName": "Mac-mini", "DNSName": "mini.tail0000.ts.net.", "OS": "macOS",
+      "Online": true, "LastSeen": "0001-01-01T00:00:00Z", "TailscaleIPs": ["fd7a:115c:a1e0::2", "100.64.0.2"]
+    },
+    "nodekey:bbb": {
+      "HostName": "DESKTOP-7", "DNSName": "fabric-twin.tail0000.ts.net.", "OS": "windows",
+      "Online": false, "LastSeen": "2026-10-26T09:00:00Z", "TailscaleIPs": ["100.64.0.3"]
+    },
+    "nodekey:ccc": {
+      "HostName": "localhost", "DNSName": "pi.tail0000.ts.net.", "OS": "linux",
+      "Online": true, "LastSeen": "0001-01-01T00:00:00Z", "TailscaleIPs": ["100.64.0.4"]
+    }
+  }
+}
